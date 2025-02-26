@@ -13,6 +13,7 @@ from tabulate import tabulate
 rcParams['font.sans-serif'] = ['Microsoft YaHei']
 rcParams['axes.unicode_minus'] = False
 
+# =============================================================================
 # 共用功能函式
 # =============================================================================
 def clean_currency(x):
@@ -93,6 +94,23 @@ def get_twd_to_usd_rate():
         return 1/30.0
 
 # =============================================================================
+# 新增：計算風險報酬 (以最近1年資料)
+# =============================================================================
+def compute_risk_return(stock_code, is_tw=True, period='1y'):
+    if is_tw:
+        ticker = convert_ticker(stock_code)
+    else:
+        ticker = stock_code
+    data = yf.Ticker(ticker).history(period=period)
+    if data.empty:
+        return np.nan, np.nan
+    prices = data['Close']
+    daily_returns = prices.pct_change().dropna()
+    ann_return = (prices.iloc[-1] / prices.iloc[0]) ** (252 / len(daily_returns)) - 1
+    ann_vol = daily_returns.std() * np.sqrt(252)
+    return ann_vol, ann_return
+
+# =============================================================================
 # 處理台股資料 (轉換為 USD 計價)
 # =============================================================================
 def process_tw_data():
@@ -106,7 +124,6 @@ def process_tw_data():
         '單價': 'Price',
         '進帳/出帳': 'Amount'
     }, inplace=True)
-    #df_tw = check_data_anomalies(df_tw, market='TW')
     df_tw['Date'] = pd.to_datetime(df_tw['Date'])
     df_tw.sort_values('Date', inplace=True)
     df_tw['Quantity'] = pd.to_numeric(df_tw['Quantity'], errors='coerce')
@@ -207,7 +224,8 @@ def process_tw_data():
 # =============================================================================
 def process_us_data():
     df_us = pd.read_csv('us_train.csv', encoding='utf-8-sig')
-    #df_us = check_data_anomalies(df_us, market='US')
+    df_us = df_us.copy()
+
     df_us['Date'] = pd.to_datetime(df_us['Date'])
     df_us.sort_values('Date', inplace=True)
     df_us = df_us.apply(fix_share_sign, axis=1)
@@ -296,14 +314,14 @@ def process_us_data():
     }
 
 # =============================================================================
-# 主程式：整合 TW 與 US 資料，產出 USD 與 TWD 版本報告與圖表
+# 主程式：整合 TW 與 US 資料，產出 USD 與 TWD 版本報告、圖表及風險報酬散點圖
 # =============================================================================
 def main():
-    twd_to_usd = get_twd_to_usd_rate()    # NT$ -> USD
-    usd_to_twd = 1 / twd_to_usd             # USD -> NT$
+    twd_to_usd = get_twd_to_usd_rate()    
+    usd_to_twd = 1 / twd_to_usd             
     
-    tw_result = process_tw_data()
-    us_result = process_us_data()
+    tw_result = process_tw_data()  
+    us_result = process_us_data()  
 
     # ----------------------
     # USD 版本報告與績效指標
@@ -336,6 +354,8 @@ def main():
     max_drawdown = drawdown_series.min() * 100
     annual_return = (final_portfolio_value_us / combined_portfolio_value_us.iloc[0])**(252/len(daily_returns)) - 1
     calmar_ratio = annual_return / abs(max_drawdown) if max_drawdown != 0 else np.nan
+
+    
 
     print("\n=== 綜合資產配置報告 (單位: USD) ===")
     print(f"累積買入金額：{total_investment_us:,.2f} USD")
@@ -373,13 +393,12 @@ def main():
         print("綜合 XIRR 計算失敗:", e)
 
     # ----------------------
-    # 個股明細 (合併後，只保留三個獲利欄位)
+    # 個股明細 (合併後，僅保留三個獲利欄位：Gain(USD)、Gain(TWD) 與 Gain(%))
     # ----------------------
     portfolio_df_combined = pd.concat([tw_result['portfolio_df'], us_result['portfolio_df']], ignore_index=True)
     portfolio_df_combined = portfolio_df_combined.fillna(0)
     portfolio_df_combined.rename(columns={'Gain': 'Gain(USD)'}, inplace=True)
     portfolio_df_combined['Gain(TWD)'] = portfolio_df_combined['Gain(USD)'] * usd_to_twd
-
     portfolio_df_combined['Gain(USD)'] = portfolio_df_combined['Gain(USD)'].apply(
         lambda x: f"\033[92m{float(x):,.2f}\033[0m" if float(x) > 0 
                   else (f"\033[91m{float(x):,.2f}\033[0m" if float(x) < 0 else f"{float(x):,.2f}")
@@ -411,7 +430,7 @@ def main():
     plt.show()
 
     # ----------------------
-    # 獲利走勢圖 (Profit %，與 USD 版本一致)
+    # 獲利走勢圖 (Profit %)
     # ----------------------
     cf_df = pd.DataFrame(combined_cashflows, columns=['Date', 'CashFlow'])
     cf_df['Date'] = pd.to_datetime(cf_df['Date'])
@@ -436,7 +455,6 @@ def main():
     # ----------------------
     combined_df = portfolio_df_combined.dropna(subset=['Price_Total'])
     combined_df = combined_df[combined_df['Price_Total'] > 0]
-    # 確保 Price_Total 為數值型態
     combined_df['Price_Total'] = pd.to_numeric(combined_df['Price_Total'], errors='coerce')
     combined_df['Price_Total_TWD'] = combined_df['Price_Total'] * usd_to_twd
     plt.figure(figsize=(10,8))
@@ -444,6 +462,31 @@ def main():
             autopct=lambda pct: f'{pct:.1f}%' if pct > 0 else '', startangle=140)
     plt.title('資產圓餅圖')
     plt.axis('equal')
+    plt.show()
+
+    # ----------------------
+    # 風險報酬散點圖 (以最近 1 年資料計算)
+    # ----------------------
+    risks = []
+    returns = []
+    labels = []
+    for idx, row in portfolio_df_combined.iterrows():
+        stock_code = row['Symbol']
+        is_tw = stock_code.isdigit()
+        ann_vol, ann_return = compute_risk_return(stock_code, is_tw=is_tw, period='1y')
+        if not np.isnan(ann_vol) and not np.isnan(ann_return):
+            risks.append(ann_vol)
+            returns.append(ann_return)
+            labels.append(stock_code)
+    plt.figure(figsize=(10,6))
+    plt.scatter(risks, returns, color='blue')
+    for i, txt in enumerate(labels):
+        plt.annotate(txt, (risks[i], returns[i]), textcoords="offset points", xytext=(5,5), fontsize=9)
+    plt.xlabel("年化波動率 (風險)")
+    plt.ylabel("年化報酬率 (回報)")
+    plt.title("風險報酬散點圖")
+    plt.grid(True)
+    plt.tight_layout()
     plt.show()
 
 if __name__ == '__main__':
