@@ -13,10 +13,8 @@ from tabulate import tabulate
 rcParams['font.sans-serif'] = ['Microsoft YaHei']
 rcParams['axes.unicode_minus'] = False
 
-# =============================================================================
 # 共用功能函式
 # =============================================================================
-
 def clean_currency(x):
     if pd.isnull(x) or str(x).strip() == "":
         return None
@@ -97,7 +95,6 @@ def get_twd_to_usd_rate():
 # =============================================================================
 # 處理台股資料 (轉換為 USD 計價)
 # =============================================================================
-
 def process_tw_data():
     df_tw = pd.read_csv('tw_train.csv', encoding='utf-8-sig')
     df_tw.rename(columns={
@@ -109,6 +106,7 @@ def process_tw_data():
         '單價': 'Price',
         '進帳/出帳': 'Amount'
     }, inplace=True)
+    #df_tw = check_data_anomalies(df_tw, market='TW')
     df_tw['Date'] = pd.to_datetime(df_tw['Date'])
     df_tw.sort_values('Date', inplace=True)
     df_tw['Quantity'] = pd.to_numeric(df_tw['Quantity'], errors='coerce')
@@ -207,9 +205,9 @@ def process_tw_data():
 # =============================================================================
 # 處理美股資料 (以 USD 計價)
 # =============================================================================
-
 def process_us_data():
     df_us = pd.read_csv('us_train.csv', encoding='utf-8-sig')
+    #df_us = check_data_anomalies(df_us, market='US')
     df_us['Date'] = pd.to_datetime(df_us['Date'])
     df_us.sort_values('Date', inplace=True)
     df_us = df_us.apply(fix_share_sign, axis=1)
@@ -298,17 +296,18 @@ def process_us_data():
     }
 
 # =============================================================================
-# 主程式：整合 TW 與 US 資料，並產出 USD 與 TWD 版本報告與圖表
+# 主程式：整合 TW 與 US 資料，產出 USD 與 TWD 版本報告與圖表
 # =============================================================================
-
 def main():
     twd_to_usd = get_twd_to_usd_rate()    # NT$ -> USD
     usd_to_twd = 1 / twd_to_usd             # USD -> NT$
     
-    tw_result = process_tw_data()  # 已換算為 USD
-    us_result = process_us_data()  # 美股以 USD 計價
+    tw_result = process_tw_data()
+    us_result = process_us_data()
 
-    # USD 版本報告
+    # ----------------------
+    # USD 版本報告與績效指標
+    # ----------------------
     date_index = tw_result['portfolio_value'].index.union(us_result['portfolio_value'].index).sort_values()
     portfolio_value_tw = tw_result['portfolio_value'].reindex(date_index, method='ffill').fillna(0)
     portfolio_value_us = us_result['portfolio_value'].reindex(date_index, method='ffill').fillna(0)
@@ -321,19 +320,40 @@ def main():
     total_profit_us = final_portfolio_value_us - invested_capital_us
     total_profit_pct_us = (total_profit_us / invested_capital_us) * 100 if invested_capital_us != 0 else 0
 
+    # 額外績效指標：Sortino Ratio 與 Calmar Ratio
+    annual_rf = 0.02
+    daily_rf = annual_rf / 252
+    daily_returns = combined_portfolio_value_us.pct_change().dropna()
+    excess_returns = daily_returns - daily_rf
+    downside_returns = excess_returns.copy()
+    downside_returns[downside_returns > 0] = 0
+    downside_deviation = np.sqrt(np.mean(np.square(downside_returns))) if len(downside_returns) > 0 else np.nan
+    sortino_ratio = (excess_returns.mean() / downside_deviation) * np.sqrt(252) if downside_deviation != 0 else np.nan
+
+    wealth_factor = combined_portfolio_value_us / invested_capital_us
+    running_max = wealth_factor.cummax()
+    drawdown_series = (wealth_factor - running_max) / running_max
+    max_drawdown = drawdown_series.min() * 100
+    annual_return = (final_portfolio_value_us / combined_portfolio_value_us.iloc[0])**(252/len(daily_returns)) - 1
+    calmar_ratio = annual_return / abs(max_drawdown) if max_drawdown != 0 else np.nan
+
     print("\n=== 綜合資產配置報告 (單位: USD) ===")
     print(f"累積買入金額：{total_investment_us:,.2f} USD")
     print(f"實際淨投入資金：{invested_capital_us:,.2f} USD")
     print(f"最終組合市值：{final_portfolio_value_us:,.2f} USD")
     print(f"總獲利：{total_profit_us:,.2f} USD")
     print(f"總獲利百分比：{total_profit_pct_us:.2f}%")
+    print(f"Sortino Ratio：{sortino_ratio:.2f}")
+    print(f"Calmar Ratio：{calmar_ratio:.2f}")
     try:
         combined_irr = xirr(combined_cashflows)
         print(f"綜合 XIRR: {combined_irr:.2%}")
     except Exception as e:
         print("綜合 XIRR 計算失敗:", e)
 
-    # TWD 版本報告 (將 USD 數值轉換)
+    # ----------------------
+    # TWD 版本報告
+    # ----------------------
     combined_portfolio_value_twd = combined_portfolio_value_us * usd_to_twd
     total_investment_twd = total_investment_us * usd_to_twd
     invested_capital_twd = invested_capital_us * usd_to_twd
@@ -352,16 +372,14 @@ def main():
     except Exception as e:
         print("綜合 XIRR 計算失敗:", e)
 
-    # 合併個股明細 (以 USD 資料為基礎)
+    # ----------------------
+    # 個股明細 (合併後，只保留三個獲利欄位)
+    # ----------------------
     portfolio_df_combined = pd.concat([tw_result['portfolio_df'], us_result['portfolio_df']], ignore_index=True)
     portfolio_df_combined = portfolio_df_combined.fillna(0)
-    # 將原有 Gain 欄位重新命名為 Gain(USD)
     portfolio_df_combined.rename(columns={'Gain': 'Gain(USD)'}, inplace=True)
-    # 新增 Gain(TWD) = Gain(USD) * usd_to_twd
     portfolio_df_combined['Gain(TWD)'] = portfolio_df_combined['Gain(USD)'] * usd_to_twd
-    # 保留 Gain(%) 不變
 
-    # 格式化數值：正數綠色，負數紅色
     portfolio_df_combined['Gain(USD)'] = portfolio_df_combined['Gain(USD)'].apply(
         lambda x: f"\033[92m{float(x):,.2f}\033[0m" if float(x) > 0 
                   else (f"\033[91m{float(x):,.2f}\033[0m" if float(x) < 0 else f"{float(x):,.2f}")
@@ -374,17 +392,16 @@ def main():
         lambda x: f"\033[92m{float(x):,.2f}%\033[0m" if float(x) > 0 
                   else (f"\033[91m{float(x):,.2f}%\033[0m" if float(x) < 0 else f"{float(x):,.2f}%")
     )
-    # 最終合併顯示欄位
     portfolio_df_combined = portfolio_df_combined[['Symbol', 'Name', 'Quantity_now', 'Price', 'Price_Total', 'Cost', 'Gain(USD)', 'Gain(TWD)', 'Gain(%)']]
     
     print("\n=== 綜合投資組合股票明細 (TWD) ===")
     print(tabulate(portfolio_df_combined, headers='keys', tablefmt='psql', showindex=False))
 
-    # ------------------------------
-    # 繪製資產走勢圖 (採用 TWD 版本)
-    # ------------------------------
+    # ----------------------
+    # 資產走勢圖 (以 TWD 為基準)
+    # ----------------------
     plt.figure(figsize=(10, 6))
-    plt.plot(combined_portfolio_value_twd.index, combined_portfolio_value_twd.values, label='Portfolio Value (TWD)')
+    plt.plot(combined_portfolio_value_twd.index, combined_portfolio_value_twd.values, label='資產走勢圖')
     plt.title('資產走勢圖')
     plt.xlabel('日期')
     plt.ylabel('組合市值 (TWD)')
@@ -393,7 +410,9 @@ def main():
     plt.tight_layout()
     plt.show()
 
-    # 繪製獲利走勢圖 (Profit %)
+    # ----------------------
+    # 獲利走勢圖 (Profit %，與 USD 版本一致)
+    # ----------------------
     cf_df = pd.DataFrame(combined_cashflows, columns=['Date', 'CashFlow'])
     cf_df['Date'] = pd.to_datetime(cf_df['Date'])
     cf_df = cf_df.sort_values('Date')
@@ -412,9 +431,13 @@ def main():
     plt.tight_layout()
     plt.show()
 
-    # 繪製資產圓餅圖 (TWD 版本)
+    # ----------------------
+    # 資產圓餅圖 (以 TWD 為基準)
+    # ----------------------
     combined_df = portfolio_df_combined.dropna(subset=['Price_Total'])
     combined_df = combined_df[combined_df['Price_Total'] > 0]
+    # 確保 Price_Total 為數值型態
+    combined_df['Price_Total'] = pd.to_numeric(combined_df['Price_Total'], errors='coerce')
     combined_df['Price_Total_TWD'] = combined_df['Price_Total'] * usd_to_twd
     plt.figure(figsize=(10,8))
     plt.pie(combined_df['Price_Total_TWD'], labels=combined_df['Name'], 
