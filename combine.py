@@ -355,8 +355,6 @@ def main():
     annual_return = (final_portfolio_value_us / combined_portfolio_value_us.iloc[0])**(252/len(daily_returns)) - 1
     calmar_ratio = annual_return / abs(max_drawdown) if max_drawdown != 0 else np.nan
 
-    
-
     print("\n=== 綜合資產配置報告 (單位: USD) ===")
     print(f"累積買入金額：{total_investment_us:,.2f} USD")
     print(f"實際淨投入資金：{invested_capital_us:,.2f} USD")
@@ -453,15 +451,34 @@ def main():
     # ----------------------
     # 資產圓餅圖 (以 TWD 為基準)
     # ----------------------
-    combined_df = portfolio_df_combined.dropna(subset=['Price_Total'])
-    combined_df = combined_df[combined_df['Price_Total'] > 0]
-    combined_df['Price_Total'] = pd.to_numeric(combined_df['Price_Total'], errors='coerce')
-    combined_df['Price_Total_TWD'] = combined_df['Price_Total'] * usd_to_twd
+    combined_df_chart = portfolio_df_combined.dropna(subset=['Price_Total'])
+    combined_df_chart = combined_df_chart[combined_df_chart['Price_Total'] > 0]
+    combined_df_chart['Price_Total'] = pd.to_numeric(combined_df_chart['Price_Total'], errors='coerce')
+    combined_df_chart['Price_Total_TWD'] = combined_df_chart['Price_Total'] * usd_to_twd
     plt.figure(figsize=(10,8))
-    plt.pie(combined_df['Price_Total_TWD'], labels=combined_df['Name'], 
+    plt.pie(combined_df_chart['Price_Total_TWD'], labels=combined_df_chart['Name'], 
             autopct=lambda pct: f'{pct:.1f}%' if pct > 0 else '', startangle=140)
     plt.title('資產圓餅圖')
     plt.axis('equal')
+    plt.show()
+
+    # ----------------------
+    # 新增：每月投入資產圖表 (扣除同日賣出金額)
+    # ----------------------
+    # 先依日期計算淨現金流（買進為負、賣出為正）
+    transactions_df = pd.concat([tw_result['df'], us_result['df']])
+    daily_net = transactions_df.groupby('Date')['Amount'].sum()
+    # 僅取淨現金流為負的日期（代表實際新增資金投入），再取絕對值
+    daily_injection = daily_net[daily_net < 0].abs()
+    monthly_investment = daily_injection.groupby(daily_injection.index.to_period('M')).sum()
+    monthly_investment.index = monthly_investment.index.to_timestamp()
+    plt.figure(figsize=(10,6))
+    plt.bar(monthly_investment.index, monthly_investment.values, width=20)
+    plt.title("每月投入資產 (USD)")
+    plt.xlabel("月份")
+    plt.ylabel("投入金額 (USD)")
+    plt.grid(True, axis='y')
+    plt.tight_layout()
     plt.show()
 
     # ----------------------
