@@ -409,8 +409,22 @@ def main():
         lambda x: f"\033[92m{float(x):,.2f}%\033[0m" if float(x) > 0 
                   else (f"\033[91m{float(x):,.2f}%\033[0m" if float(x) < 0 else f"{float(x):,.2f}%")
     )
-    portfolio_df_combined = portfolio_df_combined[['Symbol', 'Name', 'Quantity_now', 'Price', 'Price_Total', 'Cost', 'Gain(USD)', 'Gain(TWD)', 'Gain(%)']]
-    
+	
+	# 新增：計算平均成本 (每股成本)
+    portfolio_df_combined['AvgCost'] = portfolio_df_combined.apply(
+        lambda r: r['Cost'] / r['Quantity_now'] if r['Quantity_now'] != 0 else np.nan,
+        axis=1
+    )
+    portfolio_df_combined['AvgCost'] = portfolio_df_combined['AvgCost'].map(
+        lambda x: f"{x:,.2f}" if pd.notnull(x) else ""
+    )
+
+    # 最後選欄位（將 AvgCost 插入 Price 之後）
+    portfolio_df_combined = portfolio_df_combined[
+        ['Symbol', 'Name', 'Quantity_now', 'Price', 'AvgCost', 'Price_Total', 'Cost', 'Gain(USD)', 'Gain(TWD)', 'Gain(%)']
+    ]
+	
+
     print("\n=== 綜合投資組合股票明細 (TWD) ===")
     print(tabulate(portfolio_df_combined, headers='keys', tablefmt='psql', showindex=False))
 
@@ -502,6 +516,28 @@ def main():
     plt.xlabel("年化波動率 (風險)")
     plt.ylabel("年化報酬率 (回報)")
     plt.title("風險報酬散點圖")
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+	
+	# ----------------------
+    # 最大回撤（Drawdown）可視化──水下圖
+    # ----------------------
+    # wealth_index：累積殖利率（含本金）
+    wealth_index = combined_portfolio_value_us / invested_capital_us
+    # running_max：至今最高值
+    running_max = wealth_index.cummax()
+    # drawdown：現值與最高值的相對落後
+    drawdown = (wealth_index - running_max) / running_max
+
+    plt.figure(figsize=(10, 6))
+    # 填滿水下區域（多乘 100 轉成％）
+    plt.fill_between(drawdown.index, drawdown * 100, color='red', alpha=0.3)
+    plt.plot(drawdown.index, drawdown * 100, label='Drawdown (%)')
+    plt.title('最大回撤（Drawdown）水下圖')
+    plt.xlabel('日期')
+    plt.ylabel('回撤 (%)')
+    plt.legend()
     plt.grid(True)
     plt.tight_layout()
     plt.show()
