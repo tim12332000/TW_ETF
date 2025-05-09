@@ -313,6 +313,55 @@ def process_us_data():
         'portfolio_df': portfolio_df_us
     }
 
+
+def simulate_sp500_full(cashflows):
+    # 1. 轉 DataFrame
+    cf_df = (pd.DataFrame(cashflows, columns=['Date', 'Amt'])
+               .assign(Date=lambda d: pd.to_datetime(d['Date']).dt.normalize()))
+
+    start = cf_df['Date'].min()
+    end   = pd.Timestamp.today().normalize()
+
+    # 2. 指數價格 (Series)
+    sp = yf.Ticker('^SP500TR').history(start=start, end=end)['Close']
+    sp = sp.sort_index().ffill().bfill()
+    if hasattr(sp.index, 'tz'):
+        sp.index = sp.index.tz_localize(None)
+
+    # 3. 日期對齊到最近交易日
+    cf_df['TradeDate'] = cf_df['Date'].apply(
+        lambda d: sp.index[sp.index.get_indexer([d], method='bfill')[0]]
+    )
+    daily_cf = cf_df.groupby('TradeDate')['Amt'].sum()        # 正負皆可
+
+    # 4. 逐日模擬：先存市值，再調份額
+    port_list   = []     # 每日市值
+    shares_list = []     # 每日持倉份額
+    shares = 0.0
+
+    for dt in sp.index:
+        price = sp.loc[dt]
+
+        # ---- A. 先以「前一日份額」計算市值 ----
+        port_list.append(shares * price)
+
+        # ---- B. 再根據當日淨現金流調整份額 ----
+        if dt in daily_cf.index:
+            cash  = daily_cf.loc[dt]      # +提款、-投入
+            delta = -cash / price         # 負→買、正→賣
+            if shares + delta < 0:        # 避免賣超
+                delta = -shares
+            shares += delta
+
+        shares_list.append(shares)
+
+    # 5. 轉成 Series（長度必與 sp.index 一致）
+    portfolio = pd.Series(port_list,   index=sp.index, name='Portfolio_Value')
+    shares_ts = pd.Series(shares_list, index=sp.index, name='Shares')
+
+    return portfolio, shares_ts
+
+
 # =============================================================================
 # 主程式：整合 TW 與 US 資料，產出 USD 與 TWD 版本報告、圖表及風險報酬散點圖
 # =============================================================================
@@ -440,6 +489,28 @@ def main():
     plt.grid(True)
     plt.tight_layout()
     plt.show()
+	
+	# ----------------------
+    # 資產走勢圖 (以 USD 為基準)
+    # ----------------------
+	
+	#sp500
+    sp_portfolio, shares = simulate_sp500_full(combined_cashflows)
+
+    # ----------------------
+    # Benchmark 圖：絕對市值
+    # ----------------------
+    idx_all = combined_portfolio_value_us.index.union(sp_portfolio.index)
+    my_us_sync = combined_portfolio_value_us.reindex(idx_all).ffill()
+    sp_sync    = sp_portfolio.reindex(idx_all).ffill()
+
+    # 1) 絕對市值對照
+    plt.figure(figsize=(11,6))
+    plt.plot(my_us_sync.index, my_us_sync.values, label='My Portfolio (USD)')
+    plt.plot(sp_sync.index,    sp_sync.values,    label='SP500 模擬 (USD)')
+    plt.title('投組 vs. S&P 500 絕對市值走勢')
+    plt.xlabel('日期'); plt.ylabel('市值 (USD)')
+    plt.legend(); plt.grid(True); plt.tight_layout(); plt.show()
 
     # ----------------------
     # 獲利走勢圖 (Profit %)
