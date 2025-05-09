@@ -314,51 +314,57 @@ def process_us_data():
     }
 
 
-def simulate_sp500_full(cashflows):
-    # 1. 轉 DataFrame
-    cf_df = (pd.DataFrame(cashflows, columns=['Date', 'Amt'])
-               .assign(Date=lambda d: pd.to_datetime(d['Date']).dt.normalize()))
+def simulate_stock_full(cashflows, ticker='^SP500TR'):
+    """根據現金流買 / 賣指定 ticker（預設 S&P 500 Total Return）。
 
+    Parameters
+    ----------
+    cashflows : list[(Timestamp, float)]
+        正數 = 提領 / 賣出，負數 = 投入 / 買入。
+    ticker : str, default '^SP500TR'
+        Yahoo Finance 代碼；可替換成 ETF、個股或其他指數。
+
+    Returns
+    -------
+    portfolio : pd.Series
+        每日市值 (USD)。
+    shares_ts : pd.Series
+        每日持有份額。"""
+
+    # --- 整理現金流 ---
+    cf_df = (pd.DataFrame(cashflows, columns=['Date', 'Amt'])
+                .assign(Date=lambda d: pd.to_datetime(d['Date']).dt.normalize()))
     start = cf_df['Date'].min()
     end   = pd.Timestamp.today().normalize()
 
-    # 2. 指數價格 (Series)
-    sp = yf.Ticker('^SP500TR').history(start=start, end=end)['Close']
-    sp = sp.sort_index().ffill().bfill()
-    if hasattr(sp.index, 'tz'):
-        sp.index = sp.index.tz_localize(None)
+    # --- 下載價格（Series）---
+    px = yf.Ticker(ticker).history(start=start, end=end,auto_adjust=True)['Close']
+    px = px.sort_index().ffill().bfill()
+    if hasattr(px.index, 'tz'):
+        px.index = px.index.tz_localize(None)
 
-    # 3. 日期對齊到最近交易日
+    # --- 把日期對齊到交易日 ---
     cf_df['TradeDate'] = cf_df['Date'].apply(
-        lambda d: sp.index[sp.index.get_indexer([d], method='bfill')[0]]
+        lambda d: px.index[px.index.get_indexer([d], method='bfill')[0]]
     )
-    daily_cf = cf_df.groupby('TradeDate')['Amt'].sum()        # 正負皆可
+    daily_cf = cf_df.groupby('TradeDate')['Amt'].sum()
 
-    # 4. 逐日模擬：先存市值，再調份額
-    port_list   = []     # 每日市值
-    shares_list = []     # 每日持倉份額
+    # --- 逐日模擬：先算市值，再調份額 ---
+    port_list, shares_list = [], []
     shares = 0.0
-
-    for dt in sp.index:
-        price = sp.loc[dt]
-
-        # ---- A. 先以「前一日份額」計算市值 ----
+    for dt in px.index:
+        price = px.loc[dt]
         port_list.append(shares * price)
-
-        # ---- B. 再根據當日淨現金流調整份額 ----
         if dt in daily_cf.index:
-            cash  = daily_cf.loc[dt]      # +提款、-投入
-            delta = -cash / price         # 負→買、正→賣
-            if shares + delta < 0:        # 避免賣超
+            cash  = daily_cf.loc[dt]
+            delta = -cash / price
+            if shares + delta < 0:
                 delta = -shares
             shares += delta
-
         shares_list.append(shares)
 
-    # 5. 轉成 Series（長度必與 sp.index 一致）
-    portfolio = pd.Series(port_list,   index=sp.index, name='Portfolio_Value')
-    shares_ts = pd.Series(shares_list, index=sp.index, name='Shares')
-
+    portfolio = pd.Series(port_list,   index=px.index, name=f'{ticker}_Value')
+    shares_ts = pd.Series(shares_list, index=px.index, name=f'{ticker}_Shares')
     return portfolio, shares_ts
 
 
@@ -490,27 +496,33 @@ def main():
     plt.tight_layout()
     plt.show()
 	
-	# ----------------------
-    # 資產走勢圖 (以 USD 為基準)
-    # ----------------------
-	
-	#sp500
-    sp_portfolio, shares = simulate_sp500_full(combined_cashflows)
+    # === 2. 想比較的指數／ETF／個股清單（可自行增刪） ===
+    COMPARE_TICKERS = ['SPY', 'QQQ']
 
-    # ----------------------
-    # Benchmark 圖：絕對市值
-    # ----------------------
-    idx_all = combined_portfolio_value_us.index.union(sp_portfolio.index)
-    my_us_sync = combined_portfolio_value_us.reindex(idx_all).ffill()
-    sp_sync    = sp_portfolio.reindex(idx_all).ffill()
+    # 建立 dict 存放「按照你的現金流模擬」之結果
+    sim_portfolios = {}
+    for tk in COMPARE_TICKERS:
+        sim_portfolios[tk], _ = simulate_stock_full(combined_cashflows, ticker=tk)
 
-    # 1) 絕對市值對照
+    # === 3. 合併所有索引（我的投組 + 各模擬組合） ===
+    idx = combined_portfolio_value_us.index.copy()
+    for p in sim_portfolios.values():
+        idx = idx.union(p.index)
+    idx = idx.sort_values()
+
+    # === 4. 對齊、補值 ===
+    my_us = combined_portfolio_value_us.reindex(idx).ffill()
+    sims  = {tk: p.reindex(idx).ffill() for tk, p in sim_portfolios.items()}
+
+    # ---------------- 4a. 絕對市值 ----------------
     plt.figure(figsize=(11,6))
-    plt.plot(my_us_sync.index, my_us_sync.values, label='My Portfolio (USD)')
-    plt.plot(sp_sync.index,    sp_sync.values,    label='SP500 模擬 (USD)')
-    plt.title('投組 vs. S&P 500 絕對市值走勢')
-    plt.xlabel('日期'); plt.ylabel('市值 (USD)')
+    plt.plot(my_us, label='My Portfolio', linewidth=2)
+    for tk, p in sims.items():
+        plt.plot(p, label=f'{tk} 模擬')
+    plt.title('My Portfolio vs. 多重 Benchmark (USD)')
+    plt.xlabel('日期'); plt.ylabel('市值 / 指數 (USD)')
     plt.legend(); plt.grid(True); plt.tight_layout(); plt.show()
+
 
     # ----------------------
     # 獲利走勢圖 (Profit %)
