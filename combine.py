@@ -497,7 +497,7 @@ def main():
     plt.show()
 	
     # === 2. 想比較的指數／ETF／個股清單（可自行增刪） ===
-    COMPARE_TICKERS = ['SPY', 'QQQ','VT','sso','EWT','QLD','TQQQ']
+    COMPARE_TICKERS = ['SPY','QQQ','QLD','TQQQ','SQQQ','VT','EWT','GLD','TLT','SHY','BRK-B']
 
     # 建立 dict 存放「按照你的現金流模擬」之結果
     sim_portfolios = {}
@@ -544,6 +544,28 @@ def main():
     plt.grid(True)
     plt.tight_layout()
     plt.show()
+
+    # === [新增] 各 Benchmark 的「累積報酬 (%)」走勢  ===
+    sim_profit_pct = {}                       # {ticker: Series}
+    for tk, p in sims.items():
+        # 與你的 profit_pct_series 做法相同
+        pct = pd.Series(np.nan, index=idx)
+        pct[mask] = (p[mask] / daily_invested_capital[mask] - 1) * 100
+        sim_profit_pct[tk] = pct
+
+    # 畫圖：你的投組 + 多重 Benchmark
+    plt.figure(figsize=(12, 6))
+    plt.plot(profit_pct_series.index, profit_pct_series, label='My Portfolio', linewidth=2)
+    for tk, pct in sim_profit_pct.items():
+        plt.plot(pct.index, pct, label=f'{tk} 模擬', alpha=0.8)
+    plt.title('累積報酬 (%) 走勢比較')
+    plt.xlabel('日期')
+    plt.ylabel('累積報酬 (%)')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
 
     # ----------------------
     # 資產圓餅圖 (以 TWD 為基準)
@@ -624,6 +646,103 @@ def main():
     plt.grid(True)
     plt.tight_layout()
     plt.show()
+
+    # ----------------------  Benchmark 對照表 (TWD) + 風險指標  ----------------------
+    today = pd.Timestamp.today().normalize()
+
+    # 只保留 today 以前的現金流，避免雙重快照
+    base_cf = [(d, amt) for (d, amt) in combined_cashflows if d < today]
+
+    benchmark_rows = []
+
+    # ---------------------------------------------------------------------
+    # 工具函式
+    # ---------------------------------------------------------------------
+    def last_valid(series):
+        """最後一筆非 NaN 值；若整列皆 NaN 回傳 np.nan"""
+        return series.dropna().iloc[-1] if series.dropna().size else np.nan
+
+    def calc_risk_metrics(series, base_capital):
+        """回傳 (AnnVol %, MaxDD %)；series 為市值 (USD)"""
+        s = series.dropna()
+        s = s[s > 0]                           # 濾掉尚未持倉的 0 值區段
+        if s.empty:
+            return np.nan, np.nan
+        # 年化波動率
+        ret = s.pct_change().dropna()
+        ann_vol = ret.std() * np.sqrt(252) * 100
+        # 最大回撤
+        wealth = s / base_capital
+        run_max = wealth.cummax()
+        max_dd  = abs(((wealth - run_max) / run_max).min()) * 100
+        return ann_vol, max_dd
+
+    # ---------------------------------------------------------------------
+    # 你的投組
+    # ---------------------------------------------------------------------
+    p_my = combined_portfolio_value_us
+    ann_vol_my, max_dd_my = calc_risk_metrics(p_my, invested_capital_us)
+
+    benchmark_rows.append([
+        'My Portfolio',
+        p_my.iloc[-1] * usd_to_twd,                           # Final Value (TWD)
+        (p_my.iloc[-1] * usd_to_twd) - invested_capital_twd,  # Profit (TWD)
+        total_profit_pct_us,                                  # Profit %
+        combined_irr_twd * 100,                               # XIRR %
+        ann_vol_my,                                           # AnnVol %
+        max_dd_my                                             # MaxDD %
+    ])
+
+    # ---------------------------------------------------------------------
+    # 各 Benchmark
+    # ---------------------------------------------------------------------
+    for tk, p_raw in sims.items():
+        p = p_raw.copy()
+
+        final_us = last_valid(p)
+        if np.isnan(final_us):
+            print(f'[warning] {tk} 無可用資料，已略過')
+            continue
+
+        final_twd  = final_us * usd_to_twd
+        profit_twd = final_twd - invested_capital_twd
+        profit_pct = (profit_twd / invested_capital_twd) * 100
+
+        # IRR (today 一次性清算)
+        cf_sim = base_cf + [(today, final_us)]
+        try:
+            sim_irr = xirr(cf_sim) * 100
+        except Exception:
+            sim_irr = np.nan
+
+        # 風險指標
+        sim_vol, max_dd = calc_risk_metrics(p, invested_capital_us)
+
+        benchmark_rows.append([
+            tk, final_twd, profit_twd, profit_pct, sim_irr, sim_vol, max_dd
+        ])
+
+    # ---------------------------------------------------------------------
+    # 列印結果
+    # ---------------------------------------------------------------------
+    bench_headers = [
+        'Asset', 'Final Value (TWD)', 'Profit (TWD)',
+        'Profit %', 'XIRR %', 'AnnVol %', 'MaxDD %'
+    ]
+    bench_df = pd.DataFrame(benchmark_rows, columns=bench_headers)
+
+    print("\n=== 投組 vs. Benchmark 總表 (TWD) ===")
+    print(tabulate(
+        bench_df,
+        headers='keys',
+        tablefmt='psql',
+        showindex=False,
+        floatfmt='.2f'
+    ))
+
+
+
+
 
 if __name__ == '__main__':
     main()
