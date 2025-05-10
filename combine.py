@@ -497,7 +497,7 @@ def main():
     plt.show()
 	
     # === 2. 想比較的指數／ETF／個股清單（可自行增刪） ===
-    COMPARE_TICKERS = ['SPY', 'QQQ']
+    COMPARE_TICKERS = ['SPY', 'QQQ','VT','sso','EWT','QLD','TQQQ']
 
     # 建立 dict 存放「按照你的現金流模擬」之結果
     sim_portfolios = {}
