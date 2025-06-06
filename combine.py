@@ -129,14 +129,31 @@ def process_tw_data():
     df_tw['Quantity'] = pd.to_numeric(df_tw['Quantity'], errors='coerce')
     df_tw = df_tw.apply(fix_share_sign, axis=1)
     df_tw["Amount"] = df_tw["Amount"].apply(clean_currency)
-    
+
     twd_to_usd = get_twd_to_usd_rate()
     df_tw["Amount"] = df_tw["Amount"] * twd_to_usd
+
+    # ----------- 真實淨投入資金計算 (模擬帳戶現金流) -----------
+    df_tw_sorted = df_tw.sort_values("Date")
+    account_cash = 0
+    net_invested = 0
+    for _, row in df_tw_sorted.iterrows():
+        amt = row["Amount"]
+        if amt > 0:
+            account_cash += amt
+        else:
+            needed = -amt
+            if account_cash >= needed:
+                account_cash -= needed
+            else:
+                net_invested += (needed - account_cash)
+                account_cash = 0
+    invested_capital_tw = net_invested
 
     start_date = df_tw['Date'].min()
     end_date = pd.Timestamp.today()
     date_range = pd.date_range(start=start_date, end=end_date, freq='B')
-    
+
     pivot = df_tw.pivot_table(index='Date', columns='Symbol', values='Quantity', aggfunc='sum')
     pivot = pivot.reindex(date_range, fill_value=0).fillna(0)
     cum_holdings = pivot.cumsum()
@@ -160,14 +177,11 @@ def process_tw_data():
                 portfolio_snapshot_tw += shares * (price * twd_to_usd)
     today = pd.Timestamp.today().normalize()
     cashflows_tw.append((today, portfolio_snapshot_tw))
-    
+
     total_investment_tw = -df_tw[df_tw['Amount'] < 0]['Amount'].sum()
-    cash_balance_tw = df_tw['Amount'].sum()
-    invested_capital_tw = -cash_balance_tw
     final_portfolio_value_tw = portfolio_value_tw.iloc[-1]
     total_profit_tw = final_portfolio_value_tw - invested_capital_tw
     total_profit_pct_tw = (total_profit_tw / invested_capital_tw) * 100 if invested_capital_tw != 0 else 0
-
     stock_counts_tw = {}
     for idx, row in df_tw.iterrows():
         stock_code = row['Symbol']
@@ -231,10 +245,27 @@ def process_us_data():
     df_us = df_us.apply(fix_share_sign, axis=1)
     df_us["Amount"] = df_us["Amount"].apply(clean_currency)
 
+    # ----------- 真實淨投入資金計算 (模擬帳戶現金流) -----------
+    df_us_sorted = df_us.sort_values("Date")
+    account_cash = 0
+    net_invested = 0
+    for _, row in df_us_sorted.iterrows():
+        amt = row["Amount"]
+        if amt > 0:
+            account_cash += amt
+        else:
+            needed = -amt
+            if account_cash >= needed:
+                account_cash -= needed
+            else:
+                net_invested += (needed - account_cash)
+                account_cash = 0
+    invested_capital_us = net_invested
+
     start_date = df_us['Date'].min()
     end_date = pd.Timestamp.today()
     date_range = pd.date_range(start=start_date, end=end_date, freq='B')
-    
+
     pivot = df_us.pivot_table(index='Date', columns='Symbol', values='Quantity', aggfunc='sum')
     pivot = pivot.reindex(date_range, fill_value=0).fillna(0)
     cum_holdings = pivot.cumsum()
@@ -256,12 +287,11 @@ def process_us_data():
     cashflows_us.append((today, portfolio_snapshot_us))
 
     total_investment_us = -df_us[df_us['Amount'] < 0]['Amount'].sum()
-    cash_balance_us = df_us['Amount'].sum()
-    invested_capital_us = -cash_balance_us
     final_portfolio_value_us = portfolio_value_us.iloc[-1]
     total_profit_us = final_portfolio_value_us - invested_capital_us
     total_profit_pct_us = (total_profit_us / invested_capital_us) * 100 if invested_capital_us != 0 else 0
 
+    # 組裝 portfolio_df_us
     stock_counts_us = {}
     for idx, row in df_us.iterrows():
         stock_code = row['Symbol']
@@ -497,7 +527,7 @@ def main():
     plt.show()
 	
     # === 2. 想比較的指數／ETF／個股清單（可自行增刪） ===
-    COMPARE_TICKERS = ['SPY','QQQ','QLD','TQQQ','SQQQ','VT','EWT','GLD','TLT','SHY','BRK-B']
+    COMPARE_TICKERS = ['SPY','VT','BRK-B','QQQ','EWT']#['SPY','QQQ','QLD','TQQQ','SQQQ','VT','EWT','GLD','TLT','SHY','BRK-B']
 
     # 建立 dict 存放「按照你的現金流模擬」之結果
     sim_portfolios = {}
@@ -597,31 +627,6 @@ def main():
     plt.xlabel("月份")
     plt.ylabel("投入金額 (USD)")
     plt.grid(True, axis='y')
-    plt.tight_layout()
-    plt.show()
-
-    # ----------------------
-    # 風險報酬散點圖 (以最近 1 年資料計算)
-    # ----------------------
-    risks = []
-    returns = []
-    labels = []
-    for idx, row in portfolio_df_combined.iterrows():
-        stock_code = row['Symbol']
-        is_tw = stock_code.isdigit()
-        ann_vol, ann_return = compute_risk_return(stock_code, is_tw=is_tw, period='1y')
-        if not np.isnan(ann_vol) and not np.isnan(ann_return):
-            risks.append(ann_vol)
-            returns.append(ann_return)
-            labels.append(stock_code)
-    plt.figure(figsize=(10,6))
-    plt.scatter(risks, returns, color='blue')
-    for i, txt in enumerate(labels):
-        plt.annotate(txt, (risks[i], returns[i]), textcoords="offset points", xytext=(5,5), fontsize=9)
-    plt.xlabel("年化波動率 (風險)")
-    plt.ylabel("年化報酬率 (回報)")
-    plt.title("風險報酬散點圖")
-    plt.grid(True)
     plt.tight_layout()
     plt.show()
 	

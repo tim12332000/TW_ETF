@@ -193,6 +193,30 @@ def main():
     plt.grid(True)
     plt.tight_layout()
 
+
+    # ------------------------------
+    # 正確版本：以資金流模擬方式計算實際淨投入資金
+    # ------------------------------
+    df_filtered = df[["Date", "Action", "Amount"]].copy()
+    df_filtered = df_filtered[pd.to_numeric(df_filtered["Amount"], errors="coerce").notnull()]
+    df_filtered["Amount"] = df_filtered["Amount"].astype(float)
+    df_filtered = df_filtered.sort_values("Date")
+
+    account_cash = 0
+    net_invested = 0
+
+    for _, row in df_filtered.iterrows():
+        amt = row["Amount"]
+        if amt > 0:
+            account_cash += amt  # 賣出進帳
+        else:
+            needed = -amt
+            if account_cash >= needed:
+                account_cash -= needed
+            else:
+                net_invested += (needed - account_cash)
+                account_cash = 0
+
     # ------------------------------
     # 3. 投資績效數值計算與文字輸出（假設所有賣出均再投資）
     # ------------------------------
@@ -206,7 +230,8 @@ def main():
     
     print("\n=== 總結報告 ===")
     print(f"累積買入金額：{total_investment:,.2f} 元")
-    print(f"淨現金流：{cash_balance:,.2f} 元")
+    print(f"淨現金流(真實計算)：{net_invested:,.2f} 元")
+    print(f"淨現金流(cashflow)：{cash_balance:,.2f} 元")
     print(f"實際淨投入資金：{invested_capital:,.2f} 元")
     print(f"最終組合市值（現有持股）：{final_portfolio_value:,.2f} 元")
     print(f"總獲利：{total_profit:,.2f} 元")
