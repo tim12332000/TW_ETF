@@ -512,21 +512,8 @@ def main():
 
     print("\n=== 綜合投資組合股票明細 (TWD) ===")
     print(tabulate(portfolio_df_combined, headers='keys', tablefmt='psql', showindex=False))
-
-    # ----------------------
-    # 資產走勢圖 (以 TWD 為基準)
-    # ----------------------
-    plt.figure(figsize=(10, 6))
-    plt.plot(combined_portfolio_value_twd.index, combined_portfolio_value_twd.values, label='資產走勢圖')
-    plt.title('資產走勢圖')
-    plt.xlabel('日期')
-    plt.ylabel('組合市值 (TWD)')
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.show()
-	
-    # === 2. 想比較的指數／ETF／個股清單（可自行增刪） ===
+    # ~~ 此區塊已後移至 transactions_df/cashline 之後 ~~
+# === 2. 想比較的指數／ETF／個股清單（可自行增刪） ===
     COMPARE_TICKERS = ['SPY','VT','BRK-B','QQQ','EWT']#['SPY','QQQ','QLD','TQQQ','SQQQ','VT','EWT','GLD','TLT','SHY','BRK-B']
 
     # 建立 dict 存放「按照你的現金流模擬」之結果
@@ -543,18 +530,8 @@ def main():
     # === 4. 對齊、補值 ===
     my_us = combined_portfolio_value_us.reindex(idx).ffill()
     sims  = {tk: p.reindex(idx).ffill() for tk, p in sim_portfolios.items()}
-
-    # ---------------- 4a. 絕對市值 ----------------
-    plt.figure(figsize=(11,6))
-    plt.plot(my_us, label='My Portfolio', linewidth=2)
-    for tk, p in sims.items():
-        plt.plot(p, label=f'{tk} 模擬')
-    plt.title('My Portfolio vs. 多重 Benchmark (USD)')
-    plt.xlabel('日期'); plt.ylabel('市值 / 指數 (USD)')
-    plt.legend(); plt.grid(True); plt.tight_layout(); plt.show()
-
-
-    # ----------------------
+    # ~~ 此區塊已後移至 transactions_df/cashline 之後（4a 絕對市值） ~~
+# ----------------------
     # 獲利走勢圖 (Profit %)
     # ----------------------
     cf_df = pd.DataFrame(combined_cashflows, columns=['Date', 'CashFlow'])
@@ -616,6 +593,44 @@ def main():
     # ----------------------
     # 先依日期計算淨現金流（買進為負、賣出為正）
     transactions_df = pd.concat([tw_result['df'], us_result['df']])
+
+    # ==== PATCH: tx cashline (after transactions_df defined) BEGIN ====
+    # 用 transactions_df 作為現金流來源，建立累積淨投入資金線
+    transactions_df['Date'] = pd.to_datetime(transactions_df['Date']).dt.normalize()
+    cf_df = transactions_df[['Date','Amount']].sort_values('Date')
+    daily_cf = (cf_df.groupby('Date')['Amount']
+                   .sum()
+                   .reindex(date_index, fill_value=0)
+                   .cumsum())
+    daily_invested_capital = (-daily_cf).clip(lower=0)
+    daily_invested_capital_twd = daily_invested_capital * usd_to_twd
+    # ==== PATCH: tx cashline (after transactions_df defined) END ====
+
+# ----------------------
+    # 資產走勢圖 (以 TWD 為基準)
+    # ----------------------
+    plt.figure(figsize=(10, 6))
+    plt.plot(combined_portfolio_value_twd.index, combined_portfolio_value_twd.values, label='資產走勢圖')
+    plt.plot(daily_invested_capital_twd.index, daily_invested_capital_twd.values, label='累積投入資金', linestyle='--')
+    plt.title('資產走勢圖')
+    plt.xlabel('日期')
+    plt.ylabel('組合市值 (TWD)')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.show()
+
+# ---------------- 4a. 絕對市值 ----------------
+    plt.figure(figsize=(11,6))
+    plt.plot(my_us, label='My Portfolio', linewidth=2)
+    for tk, p in sims.items():
+        plt.plot(p, label=f'{tk} 模擬')
+    plt.plot(daily_invested_capital.reindex(idx).ffill(), label='累積投入資金 (USD)', linestyle='--', linewidth=1.5)
+    plt.title('My Portfolio vs. 多重 Benchmark (USD)')
+    plt.xlabel('日期'); plt.ylabel('市值 / 指數 (USD)')
+    plt.legend(); plt.grid(True); plt.tight_layout(); plt.show()
+
+
     daily_net = transactions_df.groupby('Date')['Amount'].sum()
     # 僅取淨現金流為負的日期（代表實際新增資金投入），再取絕對值
     daily_injection = daily_net[daily_net < 0].abs()
