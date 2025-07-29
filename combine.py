@@ -542,15 +542,15 @@ def main():
     profit_pct_series = pd.Series(np.nan, index=date_index)
     mask = daily_invested_capital > 0
     profit_pct_series[mask] = (combined_portfolio_value_us[mask] / daily_invested_capital[mask] - 1) * 100
-    plt.figure(figsize=(12,6))
-    plt.plot(profit_pct_series.index, profit_pct_series.values, label='獲利走勢圖', color='purple')
-    plt.xlabel('日期')
-    plt.ylabel('獲利 (%)')
-    plt.title('獲利走勢圖')
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    plt.show()
+    # plt.figure(figsize=(12,6))
+    # plt.plot(profit_pct_series.index, profit_pct_series.values, label='獲利走勢圖', color='purple')
+    # plt.xlabel('日期')
+    # plt.ylabel('獲利 (%)')
+    # plt.title('獲利走勢圖')
+    # plt.legend()
+    # plt.grid(True)
+    # plt.tight_layout()
+    # plt.show()
 
     # === [新增] 各 Benchmark 的「累積報酬 (%)」走勢  ===
     sim_profit_pct = {}                       # {ticker: Series}
@@ -605,6 +605,18 @@ def main():
     daily_invested_capital = (-daily_cf).clip(lower=0)
     daily_invested_capital_twd = daily_invested_capital * usd_to_twd
     # ==== PATCH: tx cashline (after transactions_df defined) END ====
+
+    # === Funding Ratio：資產 / 累積投入（TWD） ===
+    _den = daily_invested_capital_twd.replace(0, np.nan)
+    ratio = (combined_portfolio_value_twd / _den).dropna()
+
+    plt.figure(figsize=(10, 5))
+    plt.plot(ratio.index, ratio.values, label='Funding Ratio (資產/累積投入)')
+    plt.axhline(1.0, linestyle='--', alpha=0.6, label='=1（打平）')
+    plt.title('Funding Ratio（資產 ÷ 累積投入，TWD）')
+    plt.xlabel('日期'); plt.ylabel('倍數')
+    plt.legend(); plt.grid(True); plt.tight_layout(); plt.show()
+
 
 # ----------------------
     # 資產走勢圖 (以 TWD 為基準)
