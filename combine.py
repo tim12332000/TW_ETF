@@ -43,7 +43,7 @@ def get_daily_price(stock_symbol, start_date, end_date, is_tw=True):
                 stock_symbol = [convert_ticker(s) for s in stock_symbol]
             else:
                 stock_symbol = convert_ticker(stock_symbol)
-        data = yf.download(stock_symbol, start=start_date, end=end_date)
+        data = yf.download(stock_symbol, start=start_date, end=end_date, auto_adjust=False, actions=True)
         return data['Close']
     except Exception as e:
         print(f"下載 {stock_symbol} 價格失敗: {e}")
@@ -163,6 +163,31 @@ def process_tw_data():
     if price_data_tw is not None and not price_data_tw.empty:
         price_data_tw.columns = [col.split('.')[0] for col in price_data_tw.columns]
     price_data_tw = price_data_tw.reindex(date_range).ffill().bfill()
+    # === Calibration: align yfinance Close to first trade price per symbol (TWD scale) ===
+    try:
+        _cal_info = []
+        for _s in symbols_tw:
+            _rows = df_tw[df_tw['Symbol'] == _s].sort_values('Date')
+            if _rows.empty:
+                continue
+            _d0 = _rows.iloc[0]['Date']
+            _px_csv = _rows.iloc[0]['Price']
+            if pd.isna(_px_csv):
+                continue
+            # yfinance Close on first trade date
+            try:
+                _px_yf = float(price_data_tw.loc[_d0, _s])
+            except Exception:
+                continue
+            if _px_yf and _px_yf > 0:
+                _factor = float(_px_csv) / _px_yf
+                price_data_tw[_s] = price_data_tw[_s] * _factor
+                _cal_info.append((_s, str(_d0.date()), float(_px_csv), float(_px_yf), float(_factor)))
+        if _cal_info:
+            print("[CAL] TWD price calibration applied:", _cal_info[:5], "...")
+    except Exception as _e:
+        print("[CAL][WARN]", _e)
+
     price_data_tw = price_data_tw * twd_to_usd
 
     portfolio_value_tw = (cum_holdings * price_data_tw).sum(axis=1).fillna(0)
