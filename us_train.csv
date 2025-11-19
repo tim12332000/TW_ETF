@@ -90,7 +90,7 @@ Date,Action,Symbol,Quantity,Price,Amount
 2023/11/29,Credit Interest,,,,0.38
 2023/11/29,NRA Tax Adj,,,,-0.11
 2023/12/20,Sell,VOO,-9,$437.07,3933.60
-2023/12/20,Buy,SPLG,77,$55.945,-4307.77
+2023/12/20,Buy,SPYM,77,$55.945,-4307.77
 2023/12/26,Cash Dividend,VOO,,,16.21
 2023/12/26,NRA Tax Adj,VOO,,,-4.86
 2023/12/28,Cash Dividend,EDV,,,19.16
@@ -102,8 +102,8 @@ Date,Action,Symbol,Quantity,Price,Amount
 2024/1/30,Credit Interest,,,,0.33
 2024/1/30,NRA Tax Adj,,,,-0.09
 2024/2/6,Buy,EDV,4,$76.56,-306.24
-2024/2/6,Buy,SPLG,3,$57.955,-173.87
-2024/2/20,Buy,SPLG,4,$58.26,-233.04
+2024/2/6,Buy,SPYM,3,$57.955,-173.87
+2024/2/20,Buy,SPYM,4,$58.26,-233.04
 2024/2/20,Buy,EDV,3,$74.445,-223.34
 2024/2/28,Credit Interest,,,,0.43
 2024/2/28,NRA Tax Adj,,,,-0.12
@@ -113,40 +113,40 @@ Date,Action,Symbol,Quantity,Price,Amount
 2024/3/1,Journaled Shares,,,,2.15
 2024/3/4,Journaled Shares,,,,-10.03
 2024/3/4,Internal Transfer,,,,10.03
-2024/3/11,Buy,SPLG,6,$60.0799,-360.48
+2024/3/11,Buy,SPYM,6,$60.0799,-360.48
 2024/3/11,Buy,EDV,1,$77.72,-77.72
-2024/3/21,Cash Dividend,SPLG,,,18.21
-2024/3/21,NRA Tax Adj,SPLG,,,-5.46
+2024/3/21,Cash Dividend,SPYM,,,18.21
+2024/3/21,NRA Tax Adj,SPYM,,,-5.46
 2024/3/27,Cash Dividend,TQQQ,,,21.51
 2024/3/27,NRA Tax Adj,TQQQ,,,-6.45
 2024/3/27,Credit Interest,,,,1.12
 2024/3/27,NRA Tax Adj,,,,-0.33
 2024/4/2,Buy,EDV,5,$73.00,-365.00
-2024/4/2,Buy,SPLG,4,$60.907,-243.63
+2024/4/2,Buy,SPYM,4,$60.907,-243.63
 2024/4/4,Cash Dividend,EDV,,,26.13
 2024/4/4,NRA Tax Adj,EDV,,,-7.84
-2024/4/9,Buy,SPLG,3,$60.8485,-182.55
+2024/4/9,Buy,SPYM,3,$60.8485,-182.55
 2024/4/10,Buy,EDV,2,$71.9375,-143.88
 2024/4/10,Buy,TQQQ,1,$58.5267,-58.53
 2024/4/18,Buy,TQQQ,5,$53.345,-266.73
 2024/4/29,Credit Interest,,,,0.90
 2024/4/29,NRA Tax Adj,,,,-0.27
-2024/5/13,Buy,SPLG,2,$61.31,-122.62
+2024/5/13,Buy,SPYM,2,$61.31,-122.62
 2024/05/13,Buy,EDV,2,$71.5085,-143.02
-2024/05/20,Buy,SPLG,3,$62.4359,-187.31
+2024/05/20,Buy,SPYM,3,$62.4359,-187.31
 2024/05/20,Buy,EDV,2,$72.3189,-144.64
 2024/05/30,Credit Interest,,,,0.24
 2024/05/30,NRA Tax Adj,,,,-0.07
-2024/06/14,Buy,SPLG,8,$63.715,-509.72
-2024/06/26,Cash Dividend,SPLG,,,24.51
-2024/06/26,NRA Tax Adj,SPLG,,,-7.35
+2024/06/14,Buy,SPYM,8,$63.715,-509.72
+2024/06/26,Cash Dividend,SPYM,,,24.51
+2024/06/26,NRA Tax Adj,SPYM,,,-7.35
 2024/07/03,Cash Dividend,TQQQ,,,29.97
 2024/07/03,NRA Tax Adj,TQQQ,,,-8.99
 2024/07/03,Cash Dividend,EDV,,,34.90
 2024/07/03,NRA Tax Adj,EDV,,,-10.47
 2024/07/08,Buy,EDV,6,$73.4763,-440.86
-2024/09/25,Cash Dividend,SPLG,,,23.73
-2024/09/25,NRA Tax Adj,SPLG,,,-7.12
+2024/09/25,Cash Dividend,SPYM,,,23.73
+2024/09/25,NRA Tax Adj,SPYM,,,-7.12
 2024/10/02,Cash Dividend,TQQQ,,,24.40
 2024/10/02,NRA Tax Adj,TQQQ,,,-7.32
 2024/10/03,Cash Dividend,EDV,,,39.26
@@ -154,8 +154,8 @@ Date,Action,Symbol,Quantity,Price,Amount
 2024/12/26,Buy,EDV,10,$67.8399,-678.40
 2024/12/27,Cash Dividend,EDV,,,42.72
 2024/12/27,NRA Tax Adj,EDV,,,-12.82
-2024/12/31,Cash Dividend,SPLG,,,26.25
-2024/12/31,NRA Tax Adj,SPLG,,,-7.88
+2024/12/31,Cash Dividend,SPYM,,,26.25
+2024/12/31,NRA Tax Adj,SPYM,,,-7.88
 2024/12/31,Cash Dividend,TQQQ,,,29.19
 2024/12/31,NRA Tax Adj,TQQQ,,,-8.76
 2025/02/03,Sell,TQQQ,-50,$80.9801,"4,048.89"
@@ -164,7 +164,7 @@ Date,Action,Symbol,Quantity,Price,Amount
 2025/02/03,Buy,QLD,40,$110.3857,"-4,415.43"
 2025/02/03,Buy,QLD,10,$110.16,"-1,101.60"
 2025/02/03,Buy,QLD,14,$110.09,"-1,541.26"
-2025/02/03,Sell,SPLG,-15,$70.28,"1,054.17"
+2025/02/03,Sell,SPYM,-15,$70.28,"1,054.17"
 2025/02/03,Buy,QLD,12,$110.41,"-1,324.92"
 2025/03/03,Buy,QLD,3,$105.11,-315.33
 2025/04/01,Cash Dividend,QLD,,,2.95
@@ -176,8 +176,8 @@ Date,Action,Symbol,Quantity,Price,Amount
 2025/05/09,Buy,QLD,5,$93.04,-465.20
 2025/05/12,Buy,TSLA,1,$317.37,-317.37
 2025/06/13,Buy,EDV,6,$65.89,-395.31
-2025/06/24,Buy,SPLG,4,$71.56,-286.22
-2025/06/30,Cash Dividend,SPLG,,,21.15
+2025/06/24,Buy,SPYM,4,$71.56,-286.22
+2025/06/30,Cash Dividend,SPYM,,,21.15
 2025/06/30,Cash Dividend,QLD,,,16.14
 2025/07/01,NRA Tax Adj,QLD,,,-4.84
 2025/07/03,Cash Dividend,EDV,,,54.10
