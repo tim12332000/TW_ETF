@@ -539,7 +539,7 @@ def main():
     print(tabulate(portfolio_df_combined, headers='keys', tablefmt='psql', showindex=False))
     # ~~ 此區塊已後移至 transactions_df/cashline 之後 ~~
 # === 2. 想比較的指數／ETF／個股清單（可自行增刪） ===
-    COMPARE_TICKERS = ['SPY','VT','BRK-B','QQQ','EWT']#['SPY','QQQ','QLD','TQQQ','SQQQ','VT','EWT','GLD','TLT','SHY','BRK-B']
+    COMPARE_TICKERS = ['SPY','QQQ','EWT']#['SPY','QQQ','QLD','TQQQ','SQQQ','VT','EWT','GLD','TLT','SHY','BRK-B']
 
     # 建立 dict 存放「按照你的現金流模擬」之結果
     sim_portfolios = {}
