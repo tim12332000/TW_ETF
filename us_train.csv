@@ -184,3 +184,12 @@ Date,Action,Symbol,Quantity,Price,Amount
 2025/07/03,NRA Tax Adj,EDV,,,-16.23
 2025/07/28,Buy,EDV,8,$64.16,-513.26
 2025/08/11,Buy,UNH,1,$253.20,-253.20
+2025/09/23,NRA Tax Adj,UNH,,,-0.66
+2025/09/23,Qualified Dividend,UNH,,,2.21
+2025/09/30,NRA Tax Adj,SPLG,,,-7.08
+2025/09/30,Cash Dividend,SPLG,,,23.59
+2025/09/30,NRA Tax Adj,QLD,,,-1.59
+2025/09/30,Cash Dividend,QLD,,,5.29
+2025/10/03,NRA Tax Adj,EDV,,,-17.96
+2025/10/03,Cash Dividend,EDV,,,59.86
+2025/11/20,Stock Split,QLD,130,,0

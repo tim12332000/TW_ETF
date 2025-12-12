@@ -44,6 +44,40 @@ def get_daily_price(stock_symbol, start_date, end_date, is_tw=True):
             else:
                 stock_symbol = convert_ticker(stock_symbol)
         data = yf.download(stock_symbol, start=start_date, end=end_date, auto_adjust=False, actions=True)
+        
+        # 嘗試進行價格還原 (Un-adjust)，解決 yfinance Close 已呈現分割調整後價格的問題
+        try:
+            if 'Stock Splits' in data.columns:
+                splits = data['Stock Splits'].fillna(0)
+                close_data = data['Close'].copy()
+                
+                # 定義還原函式
+                def unadjust_series(price_s, split_s):
+                    split_events = split_s[split_s > 0]
+                    # 由後往前或由前往後皆可，只要對 split date 之前的價格乘上 ratio
+                    for split_date, ratio in split_events.items():
+                        # 找到該日期前的所有索引
+                        mask = price_s.index < split_date
+                        price_s.loc[mask] *= ratio
+                    return price_s
+                
+                # 判斷是單一股票還是多檔
+                if isinstance(data['Close'], pd.DataFrame):
+                    # 多檔股票 (columns 為 Ticker)
+                    # 注意：stock_symbol 傳進來可能是 list，也可能是 string (但 download return DF)
+                    # 需要對應 column name
+                    cols = close_data.columns
+                    for col in cols:
+                        # yfinance MultiIndex columns usually match symbol
+                        if col in splits.columns:
+                            close_data[col] = unadjust_series(close_data[col], splits[col])
+                    return close_data
+                else:
+                    # 單一股票 (Series)
+                    return unadjust_series(close_data, splits)
+        except Exception as e:
+            print(f"[WARN] Price un-adjustment failed: {e}")
+
         return data['Close']
     except Exception as e:
         print(f"下載 {stock_symbol} 價格失敗: {e}")
