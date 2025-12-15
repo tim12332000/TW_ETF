@@ -1,17 +1,72 @@
 import pandas as pd
 import numpy as np
 import yfinance as yf
+import os
 import matplotlib.pyplot as plt
 from datetime import datetime
+import time
+import pickle
+import hashlib
 from scipy.optimize import newton
 from matplotlib import rcParams
 from tabulate import tabulate
+
+# =============================================================================
+# Cache Settings
+# =============================================================================
+CACHE_DIR = 'cache'
+if not os.path.exists(CACHE_DIR):
+    os.makedirs(CACHE_DIR)
+
+def get_cached_data(key_name, fetch_func, *args, **kwargs):
+    """
+    Generic caching function.
+     Checks for 'cache/{key_name}'.
+     If exists and < 1 day old, load via pickle.
+     Else, call fetch_func(*args, **kwargs), save, and return.
+    """
+    # Sanitize key_name to be a valid filename
+    safe_key = "".join([c if c.isalnum() or c in ('-','_','.') else '_' for c in key_name])
+    if len(safe_key) > 200: # Truncate if too long, using hash for uniqueness
+        safe_key = safe_key[:150] + "_" + hashlib.md5(key_name.encode()).hexdigest()
+    
+    filepath = os.path.join(CACHE_DIR, safe_key)
+    
+    # Check cache
+    if os.path.exists(filepath):
+        # Check age
+        mtime = os.path.getmtime(filepath)
+        if (time.time() - mtime) < 86400: # 1 day in seconds
+            try:
+                with open(filepath, 'rb') as f:
+                    print(f"[CACHE] Loaded {key_name}")
+                    return pickle.load(f)
+            except Exception as e:
+                print(f"[CACHE] Error reading {filepath}: {e}, refreshing...")
+        else:
+             print(f"[CACHE] {key_name} expired, refreshing...")
+    
+    # Fetch data
+    print(f"[FETCH] Fetching {key_name}...")
+    data = fetch_func(*args, **kwargs)
+    
+    # Save to cache
+    try:
+        with open(filepath, 'wb') as f:
+            pickle.dump(data, f)
+    except Exception as e:
+        print(f"[CACHE] Error saving {filepath}: {e}")
+        
+    return data
 
 # =============================================================================
 # 全域設定：設定中文字型與正確顯示負號
 # =============================================================================
 rcParams['font.sans-serif'] = ['Microsoft YaHei']
 rcParams['axes.unicode_minus'] = False
+import os
+if not os.path.exists('output'):
+    os.makedirs('output')
 
 # =============================================================================
 # 共用功能函式
@@ -43,7 +98,22 @@ def get_daily_price(stock_symbol, start_date, end_date, is_tw=True):
                 stock_symbol = [convert_ticker(s) for s in stock_symbol]
             else:
                 stock_symbol = convert_ticker(stock_symbol)
-        data = yf.download(stock_symbol, start=start_date, end=end_date, auto_adjust=False, actions=True)
+        # Define the actual fetch operation
+        def _fetch_daily():
+            return yf.download(stock_symbol, start=start_date, end=end_date, auto_adjust=False, actions=True)
+            
+        # Create a unique key
+        # Use hash for stock_symbol if it's a list to avoid huge filenames
+        if isinstance(stock_symbol, list):
+             sym_str = str(sorted(stock_symbol))
+        else:
+             sym_str = str(stock_symbol)
+        
+        # We assume start_date/end_date are convertible to string representation
+        # Safe key generation handled inside get_cached_data to some extent, but let's be descriptive
+        key = f"daily_price_{hashlib.md5(sym_str.encode()).hexdigest()}_{str(start_date)[:10]}_{str(end_date)[:10]}.pkl"
+        
+        data = get_cached_data(key, _fetch_daily)
         
         # 嘗試進行價格還原 (Un-adjust)，解決 yfinance Close 已呈現分割調整後價格的問題
         try:
@@ -87,12 +157,20 @@ def get_current_price_yf(ticker, is_tw=True):
     try:
         if is_tw:
             ticker = convert_ticker(ticker)
-        data = yf.Ticker(ticker)
-        price = data.info.get("regularMarketPrice")
-        if price is None:
-            hist = data.history(period="1d")
-            if not hist.empty:
-                price = hist["Close"].iloc[-1]
+            
+        def _fetch_current():
+            d = yf.Ticker(ticker)
+            p = d.info.get("regularMarketPrice")
+            if p is None:
+                h = d.history(period="1d")
+                if not h.empty:
+                    p = h["Close"].iloc[-1]
+            return p
+
+        # Cache key
+        key = f"current_price_{ticker}.pkl"
+        price = get_cached_data(key, _fetch_current)
+        
         return price
     except Exception as e:
         print(f"取得 {ticker} 價格失敗: {e}")
@@ -116,12 +194,17 @@ def calculate_realized_gain(symbol, df):
 
 def get_twd_to_usd_rate():
     try:
-        ticker = yf.Ticker('TWD=X')
-        rate = ticker.info.get("regularMarketPrice")
-        if rate is None:
-            hist = ticker.history(period="1d")
-            if not hist.empty:
-                rate = hist["Close"].iloc[-1]
+        def _fetch_rate():
+            t = yf.Ticker('TWD=X')
+            r = t.info.get("regularMarketPrice")
+            if r is None:
+                h = t.history(period="1d")
+                if not h.empty:
+                    r = h["Close"].iloc[-1]
+            return r
+
+        rate = get_cached_data("rate_twd_usd.pkl", _fetch_rate)
+        
         return 1.0 / rate
     except Exception as e:
         print("取得 TWD/USD 匯率失敗:", e)
@@ -135,7 +218,12 @@ def compute_risk_return(stock_code, is_tw=True, period='1y'):
         ticker = convert_ticker(stock_code)
     else:
         ticker = stock_code
-    data = yf.Ticker(ticker).history(period=period)
+        
+    def _fetch_risk():
+         return yf.Ticker(ticker).history(period=period)
+         
+    key = f"risk_{ticker}_{period}.pkl"
+    data = get_cached_data(key, _fetch_risk)
     if data.empty:
         return np.nan, np.nan
     prices = data['Close']
@@ -143,6 +231,53 @@ def compute_risk_return(stock_code, is_tw=True, period='1y'):
     ann_return = (prices.iloc[-1] / prices.iloc[0]) ** (252 / len(daily_returns)) - 1
     ann_vol = daily_returns.std() * np.sqrt(252)
     return ann_vol, ann_return
+
+def calculate_twr_series(portfolio_value_series, cashflow_list):
+    """
+    計算時間加權報酬率 (Time-Weighted Return, TWR) 累積走勢
+    Formula: r_t = (EndValue_t - NetInflow_t) / EndValue_{t-1} - 1
+                 = (PV_t + Cashflow_t) / PV_{t-1} - 1
+    (Because Cashflow < 0 means Inflow)
+    """
+    # 1. Align cashflows to daily index
+    cf_df = pd.DataFrame(cashflow_list, columns=['Date', 'Amt'])
+    cf_df['Date'] = pd.to_datetime(cf_df['Date']).dt.normalize()
+    daily_cf = cf_df.groupby('Date')['Amt'].sum()
+    
+    # 2. Join with Portfolio Value
+    df = pd.DataFrame({'PV': portfolio_value_series})
+    df.index = pd.to_datetime(df.index).normalize()
+    df = df.join(daily_cf, how='left').fillna(0)
+    
+    returns = []
+    prev_pv = 0
+    started = False
+    
+    for date, row in df.iterrows():
+        pv = row['PV']
+        cf = row['Amt'] # -In, +Out
+        
+        if not started:
+            if pv > 0:
+                started = True
+                prev_pv = pv
+                returns.append(0.0)
+            else:
+                returns.append(0.0)
+            continue
+            
+        if prev_pv == 0:
+            daily_r = 0.0
+        else:
+            # TWR: exclude expected flow effect from denominator
+            daily_r = (pv + cf - prev_pv) / prev_pv
+            
+        returns.append(daily_r)
+        prev_pv = pv
+        
+    twr_series = pd.Series(returns, index=df.index)
+    cum_twr = (1 + twr_series).cumprod() - 1
+    return cum_twr * 100
 
 # =============================================================================
 # 處理台股資料 (轉換為 USD 計價)
@@ -427,7 +562,12 @@ def simulate_stock_full(cashflows, ticker='^SP500TR'):
     end   = pd.Timestamp.today().normalize()
 
     # --- 下載價格（Series）---
-    px = yf.Ticker(ticker).history(start=start, end=end,auto_adjust=True)['Close']
+    # --- 下載價格（Series）---
+    def _fetch_sim_history():
+        return yf.Ticker(ticker).history(start=start, end=end,auto_adjust=True)['Close']
+        
+    key = f"sim_hist_{ticker}_{start.date()}_{end.date()}.pkl"
+    px = get_cached_data(key, _fetch_sim_history)
     px = px.sort_index().ffill().bfill()
     if hasattr(px.index, 'tz'):
         px.index = px.index.tz_localize(None)
@@ -590,47 +730,68 @@ def main():
     my_us = combined_portfolio_value_us.reindex(idx).ffill()
     sims  = {tk: p.reindex(idx).ffill() for tk, p in sim_portfolios.items()}
     # ~~ 此區塊已後移至 transactions_df/cashline 之後（4a 絕對市值） ~~
-# ----------------------
-    # 獲利走勢圖 (Profit %)
     # ----------------------
-    cf_df = pd.DataFrame(combined_cashflows, columns=['Date', 'CashFlow'])
-    cf_df['Date'] = pd.to_datetime(cf_df['Date'])
-    cf_df = cf_df.sort_values('Date')
-    daily_cf = cf_df.groupby('Date')['CashFlow'].sum().reindex(date_index, fill_value=0).cumsum()
-    daily_invested_capital = -daily_cf
-    profit_pct_series = pd.Series(np.nan, index=date_index)
-    mask = daily_invested_capital > 0
-    profit_pct_series[mask] = (combined_portfolio_value_us[mask] / daily_invested_capital[mask] - 1) * 100
-    # plt.figure(figsize=(12,6))
-    # plt.plot(profit_pct_series.index, profit_pct_series.values, label='獲利走勢圖', color='purple')
-    # plt.xlabel('日期')
-    # plt.ylabel('獲利 (%)')
-    # plt.title('獲利走勢圖')
-    # plt.legend()
-    # plt.grid(True)
-    # plt.tight_layout()
-    # plt.show()
+    # 累積報酬率走勢圖 (TWR - 不受本金進出影響)
+    # ----------------------
+    twr_series = calculate_twr_series(combined_portfolio_value_us, combined_cashflows)
 
-    # === [新增] 各 Benchmark 的「累積報酬 (%)」走勢  ===
-    sim_profit_pct = {}                       # {ticker: Series}
-    for tk, p in sims.items():
-        # 與你的 profit_pct_series 做法相同
-        pct = pd.Series(np.nan, index=idx)
-        pct[mask] = (p[mask] / daily_invested_capital[mask] - 1) * 100
-        sim_profit_pct[tk] = pct
+    # Benchmarks TWR (Pure Price Return)
+    bench_twr = {}
+    
+    # 找出 My Portfolio 開始的第一天
+    valid_idx = twr_series[twr_series != 0].index
+    if not valid_idx.empty:
+        start_date = valid_idx[0]
+    else:
+        start_date = twr_series.index[0]
+        
+    # 下載 Benchmark 價格並歸一化
+    for tk in COMPARE_TICKERS:
+        try:
+            def _fetch_bench():
+                return yf.download(tk, start=start_date, end=None, progress=False, auto_adjust=True)
+                
+            key = f"bench_twr_{tk}_{start_date.date()}.pkl"
+            _px = get_cached_data(key, _fetch_bench)
+            
+            if isinstance(_px, pd.DataFrame):
+                # Handle MultiIndex columns if present
+                if 'Close' in _px.columns:
+                     _px = _px['Close']
+                else:
+                     # Fallback if structure is different
+                     _px = _px.iloc[:, 0]
+            
+            # Additional check for Series vs DataFrame
+            if isinstance(_px, pd.DataFrame):
+                _px = _px.iloc[:, 0]
 
-    # 畫圖：你的投組 + 多重 Benchmark
+            _px.index = _px.index.tz_localize(None)
+            _px = _px.reindex(twr_series.index).ffill().bfill()
+            
+            # 歸一化: (Pt / P0) - 1
+            start_val = _px.loc[start_date]
+            if start_val > 0:
+                 bench_twr[tk] = (_px / start_val - 1) * 100
+        except Exception as e:
+             print(f"Skipping benchmark TWR for {tk}: {e}")
+
+    # 畫圖
     plt.figure(figsize=(12, 6))
-    plt.plot(profit_pct_series.index, profit_pct_series, label='My Portfolio', linewidth=2)
-    for tk, pct in sim_profit_pct.items():
-        plt.plot(pct.index, pct, label=f'{tk} 模擬', alpha=0.8)
-    plt.title('累積報酬 (%) 走勢比較')
+    plt.plot(twr_series.index, twr_series, label='My Portfolio (TWR)', linewidth=2, color='blue')
+    
+    for tk, ser in bench_twr.items():
+        plt.plot(ser.index, ser, label=f'{tk}', alpha=0.7)
+
+    plt.title('累積報酬率比較 (Time-Weighted Return)')
     plt.xlabel('日期')
     plt.ylabel('累積報酬 (%)')
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
+    plt.savefig('output/cumulative_return_comparison.png')
     plt.show()
+    plt.close()
 
 
     # ----------------------
@@ -645,7 +806,10 @@ def main():
             autopct=lambda pct: f'{pct:.1f}%' if pct > 0 else '', startangle=140)
     plt.title('資產圓餅圖')
     plt.axis('equal')
+    plt.axis('equal')
+    plt.savefig('output/asset_pie_chart.png')
     plt.show()
+    plt.close()
 
     # ----------------------
     # 新增：每月投入資產圖表 (扣除同日賣出金額)
@@ -674,7 +838,10 @@ def main():
     plt.axhline(1.0, linestyle='--', alpha=0.6, label='=1（打平）')
     plt.title('Funding Ratio（資產 ÷ 累積投入，TWD）')
     plt.xlabel('日期'); plt.ylabel('倍數')
-    plt.legend(); plt.grid(True); plt.tight_layout(); plt.show()
+    plt.legend(); plt.grid(True); plt.tight_layout();
+    plt.savefig('output/funding_ratio.png')
+    plt.show()
+    plt.close()
 
 
 # ----------------------
@@ -689,7 +856,10 @@ def main():
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
+    plt.tight_layout()
+    plt.savefig('output/asset_trend.png')
     plt.show()
+    plt.close()
 
 # ---------------- 4a. 絕對市值 ----------------
     plt.figure(figsize=(11,6))
@@ -699,7 +869,10 @@ def main():
     plt.plot(daily_invested_capital.reindex(idx).ffill(), label='累積投入資金 (USD)', linestyle='--', linewidth=1.5)
     plt.title('My Portfolio vs. 多重 Benchmark (USD)')
     plt.xlabel('日期'); plt.ylabel('市值 / 指數 (USD)')
-    plt.legend(); plt.grid(True); plt.tight_layout(); plt.show()
+    plt.legend(); plt.grid(True); plt.tight_layout();
+    plt.savefig('output/portfolio_vs_benchmark_usd.png')
+    plt.show()
+    plt.close()
 
 
     daily_net = transactions_df.groupby('Date')['Amount'].sum()
@@ -714,7 +887,10 @@ def main():
     plt.ylabel("投入金額 (USD)")
     plt.grid(True, axis='y')
     plt.tight_layout()
+    plt.tight_layout()
+    plt.savefig('output/monthly_investment.png')
     plt.show()
+    plt.close()
 	
 	# ----------------------
     # 最大回撤（Drawdown）可視化──水下圖
@@ -736,7 +912,10 @@ def main():
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
+    plt.tight_layout()
+    plt.savefig('output/drawdown_underwater.png')
     plt.show()
+    plt.close()
 
     # ----------------------  Benchmark 對照表 (TWD) + 風險指標  ----------------------
     today = pd.Timestamp.today().normalize()
@@ -753,26 +932,51 @@ def main():
         """最後一筆非 NaN 值；若整列皆 NaN 回傳 np.nan"""
         return series.dropna().iloc[-1] if series.dropna().size else np.nan
 
-    def calc_risk_metrics(series, base_capital):
-        """回傳 (AnnVol %, MaxDD %)；series 為市值 (USD)"""
-        s = series.dropna()
-        s = s[s > 0]                           # 濾掉尚未持倉的 0 值區段
-        if s.empty:
-            return np.nan, np.nan
+    def calc_risk_metrics_from_twr(twr_pct_series, risk_free_rate=0.03):
+        """
+        計算風險指標 (AnnVol %, MaxDD %, Sharpe)
+        twr_pct_series: 累積報酬率 (%) Series (Time-Weighted)
+                        e.g. 0, 1.2, -0.5, 10.5 ...
+        """
+        if twr_pct_series.empty:
+            return np.nan, np.nan, np.nan
+
+        # 還原成淨值走勢 (Wealth Index)
+        wealth_index = 1 + (twr_pct_series / 100.0)
+        
+        # 日報酬率
+        ret = wealth_index.pct_change().dropna()
+        
+        if ret.empty:
+             return np.nan, np.nan, np.nan
+
         # 年化波動率
-        ret = s.pct_change().dropna()
-        ann_vol = ret.std() * np.sqrt(252) * 100
-        # 最大回撤
-        wealth = s / base_capital
-        run_max = wealth.cummax()
-        max_dd  = abs(((wealth - run_max) / run_max).min()) * 100
-        return ann_vol, max_dd
+        ann_vol = ret.std() * np.sqrt(252)
+        
+        # 夏普值 (Sharpe Ratio)
+        daily_rf = (1 + risk_free_rate) ** (1/252) - 1
+        excess_ret = ret - daily_rf
+        if ret.std() == 0:
+            sharpe = np.nan
+        else:
+            sharpe = np.sqrt(252) * (excess_ret.mean() / ret.std())
+
+        # 最大回撤 (Max Drawdown)
+        run_max = wealth_index.cummax()
+        if run_max.max() == 0:
+            max_dd = 0
+        else:
+            drawdown = (wealth_index - run_max) / run_max
+            max_dd = abs(drawdown.min())
+
+        return ann_vol * 100, max_dd * 100, sharpe
 
     # ---------------------------------------------------------------------
     # 你的投組
     # ---------------------------------------------------------------------
     p_my = combined_portfolio_value_us
-    ann_vol_my, max_dd_my = calc_risk_metrics(p_my, invested_capital_us)
+    # 改用 TWR Series 計算風險指標
+    ann_vol_my, max_dd_my, sharpe_my = calc_risk_metrics_from_twr(twr_series)
 
     benchmark_rows.append([
         'My Portfolio',
@@ -781,7 +985,8 @@ def main():
         total_profit_pct_us,                                  # Profit %
         combined_irr_twd * 100,                               # XIRR %
         ann_vol_my,                                           # AnnVol %
-        max_dd_my                                             # MaxDD %
+        max_dd_my,                                            # MaxDD %
+        sharpe_my                                             # Sharpe
     ])
 
     # ---------------------------------------------------------------------
@@ -806,11 +1011,14 @@ def main():
         except Exception:
             sim_irr = np.nan
 
-        # 風險指標
-        sim_vol, max_dd = calc_risk_metrics(p, invested_capital_us)
+        # 風險指標 (改用 Benchmark TWR)
+        if tk in bench_twr:
+            sim_vol, max_dd, sim_sharpe = calc_risk_metrics_from_twr(bench_twr[tk])
+        else:
+            sim_vol, max_dd, sim_sharpe = np.nan, np.nan, np.nan
 
         benchmark_rows.append([
-            tk, final_twd, profit_twd, profit_pct, sim_irr, sim_vol, max_dd
+            tk, final_twd, profit_twd, profit_pct, sim_irr, sim_vol, max_dd, sim_sharpe
         ])
 
     # ---------------------------------------------------------------------
@@ -818,7 +1026,7 @@ def main():
     # ---------------------------------------------------------------------
     bench_headers = [
         'Asset', 'Final Value (TWD)', 'Profit (TWD)',
-        'Profit %', 'XIRR %', 'AnnVol %', 'MaxDD %'
+        'Profit %', 'XIRR %', 'AnnVol %', 'MaxDD %', 'Sharpe'
     ]
     bench_df = pd.DataFrame(benchmark_rows, columns=bench_headers)
 
