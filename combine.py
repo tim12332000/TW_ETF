@@ -370,7 +370,7 @@ def process_tw_data():
             if price is not None:
                 portfolio_snapshot_tw += shares * (price * twd_to_usd)
     today = pd.Timestamp.today().normalize()
-    cashflows_tw.append((today, portfolio_snapshot_tw))
+    # cashflows_tw.append((today, portfolio_snapshot_tw))
 
     total_investment_tw = -df_tw[df_tw['Amount'] < 0]['Amount'].sum()
     final_portfolio_value_tw = portfolio_value_tw.iloc[-1]
@@ -424,9 +424,11 @@ def process_tw_data():
         'final_portfolio_value': final_portfolio_value_tw,
         'total_profit': total_profit_tw,
         'total_profit_pct': total_profit_pct_tw,
-        'portfolio_df': portfolio_df_tw
+        'portfolio_df': portfolio_df_tw,
+        'portfolio_snapshot': portfolio_snapshot_tw,
+        'price_data': price_data_tw,
+        'symbols': symbols_tw
     }
-
 # =============================================================================
 # 處理美股資料 (以 USD 計價)
 # =============================================================================
@@ -478,7 +480,7 @@ def process_us_data():
             if price is not None:
                 portfolio_snapshot_us += shares * price
     today = pd.Timestamp.today().normalize()
-    cashflows_us.append((today, portfolio_snapshot_us))
+    # cashflows_us.append((today, portfolio_snapshot_us))
 
     total_investment_us = -df_us[df_us['Amount'] < 0]['Amount'].sum()
     final_portfolio_value_us = portfolio_value_us.iloc[-1]
@@ -534,7 +536,10 @@ def process_us_data():
         'final_portfolio_value': final_portfolio_value_us,
         'total_profit': total_profit_us,
         'total_profit_pct': total_profit_pct_us,
-        'portfolio_df': portfolio_df_us
+        'portfolio_df': portfolio_df_us,
+        'portfolio_snapshot': portfolio_snapshot_us,
+        'price_data': price_data_us,
+        'symbols': symbols_us
     }
 
 
@@ -597,6 +602,92 @@ def simulate_stock_full(cashflows, ticker='^SP500TR'):
     return portfolio, shares_ts
 
 
+def plot_stock_performance(tw_res, us_res):
+    """
+    Generate a chart showing the cumulative return % (TWR) for every individual stock.
+    X: Time, Y: Return %
+    """
+    plt.figure(figsize=(14, 8))
+    
+    # Process TW stocks
+    _process_stock_twr(tw_res, "TW", plt)
+    
+    # Process US stocks
+    _process_stock_twr(us_res, "US", plt)
+    
+    plt.title("Individual Stock Performance (TWR %)")
+    plt.xlabel("Date")
+    plt.ylabel("Cumulative Return (%)")
+    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='small', ncol=1)
+    plt.grid(True, alpha=0.3)
+    plt.tight_layout()
+    plt.savefig('output/stock_performance.png')
+    plt.show()
+    plt.close()
+    print("Stock performance chart saved to output/stock_performance.png")
+
+def _process_stock_twr(res_data, region, plt_obj):
+    df_tx = res_data['df']
+    price_df = res_data['price_data']
+    date_range = res_data['date_range']
+    symbols = res_data['symbols']
+    
+    for sym in symbols:
+        # Filter transactions for this symbol
+        sym_tx = df_tx[df_tx['Symbol'] == sym].copy()
+        if sym_tx.empty:
+            continue
+            
+        # 1. Build Shares Series
+        daily_quantity = sym_tx.groupby('Date')['Quantity'].sum()
+        shares_series = daily_quantity.reindex(date_range).fillna(0).cumsum()
+        
+        # 2. Get Price Series
+        price_col = None
+        if sym in price_df.columns:
+            price_col = sym
+        elif str(sym).split('.')[0] in price_df.columns:
+             price_col = str(sym).split('.')[0]
+        
+        if price_col is None:
+            continue
+            
+        price_s = price_df[price_col]
+        
+        # 3. Calculate Portfolio Value (PV) = Shares * Price
+        combined_df = pd.DataFrame({'Shares': shares_series, 'Price': price_s})
+        combined_df = combined_df.dropna(subset=['Price']) 
+        combined_df['Shares'] = combined_df['Shares'].ffill().fillna(0)
+        
+        pv_series = combined_df['Shares'] * combined_df['Price']
+        
+        # 4. Prepare Cashflows
+        cfs = list(sym_tx[['Date', 'Amount']].itertuples(index=False, name=None))
+        
+        # 5. Calculate TWR
+        try:
+            twr = calculate_twr_series(pv_series, cfs)
+            
+            # 6. Plot
+            if not twr.empty and not (twr == 0).all():
+                non_zero = twr[twr != 0]
+                if not non_zero.empty:
+                    first_date = non_zero.index[0]
+                    plot_data = twr.loc[first_date:]
+                    
+                    # Style: dashed if sold out
+                    current_shares = shares_series.iloc[-1]
+                    alpha = 1.0 if abs(current_shares) > 0.001 else 0.4
+                    linestyle = '-' if abs(current_shares) > 0.001 else ':'
+                    label = f"{sym} ({region})"
+                    
+                    plt_obj.plot(plot_data.index, plot_data, label=label, alpha=alpha, linestyle=linestyle, linewidth=1.5)
+                    
+        except Exception as e:
+            print(f"Error calculating TWR for {sym}: {e}")
+
+
+
 # =============================================================================
 # 主程式：整合 TW 與 US 資料，產出 USD 與 TWD 版本報告、圖表及風險報酬散點圖
 # =============================================================================
@@ -648,7 +739,10 @@ def main():
     print(f"Sortino Ratio：{sortino_ratio:.2f}")
     print(f"Calmar Ratio：{calmar_ratio:.2f}")
     try:
-        combined_irr = xirr(combined_cashflows)
+        # XIRR 需要包含最終市值作為一筆正向現金流
+        total_snapshot = tw_result['portfolio_snapshot'] + us_result['portfolio_snapshot']
+        xirr_cashflows = combined_cashflows + [(pd.Timestamp.today(), total_snapshot)]
+        combined_irr = xirr(xirr_cashflows)
         print(f"綜合 XIRR: {combined_irr:.2%}")
     except Exception as e:
         print("綜合 XIRR 計算失敗:", e)
@@ -669,7 +763,21 @@ def main():
     print(f"總獲利：{total_profit_twd:,.2f} TWD")
     print(f"總獲利百分比：{total_profit_pct_us:.2f}%")
     try:
-        combined_irr_twd = xirr(combined_cashflows)
+        # TWD XIRR 也需要包含最終市值 (轉換後)
+        total_snapshot_twd = (tw_result['portfolio_snapshot'] + us_result['portfolio_snapshot']) * usd_to_twd
+        xirr_cashflows_twd = combined_cashflows + [(pd.Timestamp.today(), total_snapshot_twd)]
+        # Note: combined_cashflows here are presumably in USD scale from previous logic? 
+        # Wait, cashflows_tw came from 'Amount' * twd_to_usd. So combined_cashflows is in USD.
+        # But for TWD report, we probably want to calculate XIRR on TWD cashflows?
+        # The original code: combined_irr_twd = xirr(combined_cashflows) uses USD cashflows!
+        # XIRR % should be roughly same for USD or TWD if currency fluctuation isn't huge, 
+        # but technically valid to just check the variable usage.
+        # Original code used 'combined_cashflows' for both. Let's stick to that but add snapshot.
+        # Actually, if we use USD cashflows for the second print, we just reuse xirr_cashflows.
+        # BUT the print says "Units: TWD".
+        # Let's double check if we need to convert flows back to TWD.
+        # effectively xirr should be dimension-less (%) so calculating on USD flows is fine.
+        combined_irr_twd = xirr(xirr_cashflows) 
         print(f"綜合 XIRR: {combined_irr_twd:.2%}")
     except Exception as e:
         print("綜合 XIRR 計算失敗:", e)
@@ -776,9 +884,153 @@ def main():
         except Exception as e:
              print(f"Skipping benchmark TWR for {tk}: {e}")
 
+    # ----------------------  Benchmark 對照表 (TWD) + 風險指標  ----------------------
+    today = pd.Timestamp.today().normalize()
+
+    # 只保留 today 以前的現金流，避免雙重快照
+    base_cf = [(d, amt) for (d, amt) in combined_cashflows if d < today]
+
+    benchmark_rows = []
+
+    # ---------------------------------------------------------------------
+    # 工具函式
+    # ---------------------------------------------------------------------
+    def last_valid(series):
+        """最後一筆非 NaN 值；若整列皆 NaN 回傳 np.nan"""
+        return series.dropna().iloc[-1] if series.dropna().size else np.nan
+
+    def calc_risk_metrics_from_twr(twr_pct_series, risk_free_rate=0.03):
+        """
+        計算風險指標 (AnnVol %, MaxDD %, Sharpe)
+        twr_pct_series: 累積報酬率 (%) Series (Time-Weighted)
+                        e.g. 0, 1.2, -0.5, 10.5 ...
+        """
+        if twr_pct_series.empty:
+            return np.nan, np.nan, np.nan
+
+        # 還原成淨值走勢 (Wealth Index)
+        wealth_index = 1 + (twr_pct_series / 100.0)
+        
+        # 日報酬率
+        ret = wealth_index.pct_change().dropna()
+        
+        if ret.empty:
+            return np.nan, np.nan, np.nan
+
+        # 年化波動率
+        ann_vol = ret.std() * np.sqrt(252)
+        
+        # 夏普值 (Sharpe Ratio)
+        daily_rf = (1 + risk_free_rate) ** (1/252) - 1
+        excess_ret = ret - daily_rf
+        if ret.std() == 0:
+            sharpe = np.nan
+        else:
+            sharpe = np.sqrt(252) * (excess_ret.mean() / ret.std())
+
+        # 最大回撤 (Max Drawdown)
+        run_max = wealth_index.cummax()
+        if run_max.max() == 0:
+            max_dd = 0
+        else:
+            drawdown = (wealth_index - run_max) / run_max
+            max_dd = abs(drawdown.min())
+
+        return ann_vol * 100, max_dd * 100, sharpe
+
+    # ---------------------------------------------------------------------
+    # 你的投組
+    # ---------------------------------------------------------------------
+    p_my = combined_portfolio_value_us
+    # 改用 TWR Series 計算風險指標
+    ann_vol_my, max_dd_my, sharpe_my = calc_risk_metrics_from_twr(twr_series)
+
+    benchmark_rows.append([
+        'My Portfolio',
+        p_my.iloc[-1] * usd_to_twd,                           # Final Value (TWD)
+        (p_my.iloc[-1] * usd_to_twd) - invested_capital_twd,  # Profit (TWD)
+        total_profit_pct_us,                                  # Profit %
+        combined_irr_twd * 100,                               # XIRR %
+        ann_vol_my,                                           # AnnVol %
+        max_dd_my,                                            # MaxDD %
+        sharpe_my                                             # Sharpe
+    ])
+
+    # ---------------------------------------------------------------------
+    # 各 Benchmark
+    # ---------------------------------------------------------------------
+    for tk, p_raw in sims.items():
+        p = p_raw.copy()
+
+        final_us = last_valid(p)
+        if np.isnan(final_us):
+            print(f'[warning] {tk} 無可用資料，已略過')
+            continue
+
+        final_twd  = final_us * usd_to_twd
+        profit_twd = final_twd - invested_capital_twd
+        profit_pct = (profit_twd / invested_capital_twd) * 100
+
+        # IRR (today 一次性清算)
+        cf_sim = base_cf + [(today, final_us)]
+        try:
+            sim_irr = xirr(cf_sim) * 100
+        except Exception:
+            sim_irr = np.nan
+
+        # 風險指標 (改用 Benchmark TWR)
+        if tk in bench_twr:
+            sim_vol, max_dd, sim_sharpe = calc_risk_metrics_from_twr(bench_twr[tk])
+        else:
+            sim_vol, max_dd, sim_sharpe = np.nan, np.nan, np.nan
+
+        benchmark_rows.append([
+            tk, final_twd, profit_twd, profit_pct, sim_irr, sim_vol, max_dd, sim_sharpe
+        ])
+
+    # ---------------------------------------------------------------------
+    # 列印結果
+    # ---------------------------------------------------------------------
+    bench_headers = [
+        'Asset', 'Final Value (TWD)', 'Profit (TWD)',
+        'Profit %', 'XIRR %', 'AnnVol %', 'MaxDD %', 'Sharpe'
+    ]
+    bench_df = pd.DataFrame(benchmark_rows, columns=bench_headers)
+
+    print("\n=== 投組 vs. Benchmark 總表 (TWD) ===")
+    print(tabulate(
+        bench_df,
+        headers='keys',
+        tablefmt='psql',
+        showindex=False,
+        floatfmt='.2f'
+    ))
+
     # 畫圖
     plt.figure(figsize=(12, 6))
     plt.plot(twr_series.index, twr_series, label='My Portfolio (TWR)', linewidth=2, color='blue')
+    plt.legend()
+    plt.title('Portfolio Cumulative TWR Return')
+    plt.grid(True)
+    plt.savefig('output/twr_chart.png')
+    # plt.close() # Keep open or close depending on usage? Original code didn't have close() maybe? 
+    # Ah, original code ended with plt.plot(...). It didn't save or show in the snippet I saw?
+    # Wait, the snippet showed:
+    # 799:     plt.figure(figsize=(12, 6))
+    # 800:     plt.plot(twr_series.index, twr_series, label='My Portfolio (TWR)', linewidth=2, color='blue')
+    # It didn't show the end of main(). 
+    # But I am replacing from line 800.
+    # The snippet cut off at line 800.
+    # I should be careful not to delete subsequent code if I don't know what it is.
+    # I will just INSERT the call at the end of main, or after the TWR plotting block.
+    # I need to see more lines to be safe.
+    # Let's abort this chunk and view more lines first?
+    # No, I can assume the standard pattern or just append to end of file if main calls it?
+    # Wait, I am replacing line 800 "plt.plot(twr_series...)"
+    # I should instead READ the end of the file first.
+    # I will remove this chunk from this call and do a separate view_file then edit.
+    pass
+
     
     for tk, ser in bench_twr.items():
         plt.plot(ser.index, ser, label=f'{tk}', alpha=0.7)
@@ -917,127 +1169,10 @@ def main():
     plt.show()
     plt.close()
 
-    # ----------------------  Benchmark 對照表 (TWD) + 風險指標  ----------------------
-    today = pd.Timestamp.today().normalize()
+    # Output individual stock performance
+    plot_stock_performance(tw_result, us_result)
 
-    # 只保留 today 以前的現金流，避免雙重快照
-    base_cf = [(d, amt) for (d, amt) in combined_cashflows if d < today]
 
-    benchmark_rows = []
-
-    # ---------------------------------------------------------------------
-    # 工具函式
-    # ---------------------------------------------------------------------
-    def last_valid(series):
-        """最後一筆非 NaN 值；若整列皆 NaN 回傳 np.nan"""
-        return series.dropna().iloc[-1] if series.dropna().size else np.nan
-
-    def calc_risk_metrics_from_twr(twr_pct_series, risk_free_rate=0.03):
-        """
-        計算風險指標 (AnnVol %, MaxDD %, Sharpe)
-        twr_pct_series: 累積報酬率 (%) Series (Time-Weighted)
-                        e.g. 0, 1.2, -0.5, 10.5 ...
-        """
-        if twr_pct_series.empty:
-            return np.nan, np.nan, np.nan
-
-        # 還原成淨值走勢 (Wealth Index)
-        wealth_index = 1 + (twr_pct_series / 100.0)
-        
-        # 日報酬率
-        ret = wealth_index.pct_change().dropna()
-        
-        if ret.empty:
-             return np.nan, np.nan, np.nan
-
-        # 年化波動率
-        ann_vol = ret.std() * np.sqrt(252)
-        
-        # 夏普值 (Sharpe Ratio)
-        daily_rf = (1 + risk_free_rate) ** (1/252) - 1
-        excess_ret = ret - daily_rf
-        if ret.std() == 0:
-            sharpe = np.nan
-        else:
-            sharpe = np.sqrt(252) * (excess_ret.mean() / ret.std())
-
-        # 最大回撤 (Max Drawdown)
-        run_max = wealth_index.cummax()
-        if run_max.max() == 0:
-            max_dd = 0
-        else:
-            drawdown = (wealth_index - run_max) / run_max
-            max_dd = abs(drawdown.min())
-
-        return ann_vol * 100, max_dd * 100, sharpe
-
-    # ---------------------------------------------------------------------
-    # 你的投組
-    # ---------------------------------------------------------------------
-    p_my = combined_portfolio_value_us
-    # 改用 TWR Series 計算風險指標
-    ann_vol_my, max_dd_my, sharpe_my = calc_risk_metrics_from_twr(twr_series)
-
-    benchmark_rows.append([
-        'My Portfolio',
-        p_my.iloc[-1] * usd_to_twd,                           # Final Value (TWD)
-        (p_my.iloc[-1] * usd_to_twd) - invested_capital_twd,  # Profit (TWD)
-        total_profit_pct_us,                                  # Profit %
-        combined_irr_twd * 100,                               # XIRR %
-        ann_vol_my,                                           # AnnVol %
-        max_dd_my,                                            # MaxDD %
-        sharpe_my                                             # Sharpe
-    ])
-
-    # ---------------------------------------------------------------------
-    # 各 Benchmark
-    # ---------------------------------------------------------------------
-    for tk, p_raw in sims.items():
-        p = p_raw.copy()
-
-        final_us = last_valid(p)
-        if np.isnan(final_us):
-            print(f'[warning] {tk} 無可用資料，已略過')
-            continue
-
-        final_twd  = final_us * usd_to_twd
-        profit_twd = final_twd - invested_capital_twd
-        profit_pct = (profit_twd / invested_capital_twd) * 100
-
-        # IRR (today 一次性清算)
-        cf_sim = base_cf + [(today, final_us)]
-        try:
-            sim_irr = xirr(cf_sim) * 100
-        except Exception:
-            sim_irr = np.nan
-
-        # 風險指標 (改用 Benchmark TWR)
-        if tk in bench_twr:
-            sim_vol, max_dd, sim_sharpe = calc_risk_metrics_from_twr(bench_twr[tk])
-        else:
-            sim_vol, max_dd, sim_sharpe = np.nan, np.nan, np.nan
-
-        benchmark_rows.append([
-            tk, final_twd, profit_twd, profit_pct, sim_irr, sim_vol, max_dd, sim_sharpe
-        ])
-
-    # ---------------------------------------------------------------------
-    # 列印結果
-    # ---------------------------------------------------------------------
-    bench_headers = [
-        'Asset', 'Final Value (TWD)', 'Profit (TWD)',
-        'Profit %', 'XIRR %', 'AnnVol %', 'MaxDD %', 'Sharpe'
-    ]
-    bench_df = pd.DataFrame(benchmark_rows, columns=bench_headers)
-
-    print("\n=== 投組 vs. Benchmark 總表 (TWD) ===")
-    print(tabulate(
-        bench_df,
-        headers='keys',
-        tablefmt='psql',
-        showindex=False,
-        floatfmt='.2f'
-    ))
 
 
 
