@@ -1,4 +1,8 @@
 import pandas as pd
+import sys
+import re
+
+
 import numpy as np
 import yfinance as yf
 import os
@@ -67,6 +71,45 @@ rcParams['axes.unicode_minus'] = False
 import os
 if not os.path.exists('output'):
     os.makedirs('output')
+
+# =============================================================================
+# Logging Class
+# =============================================================================
+class DualLogger:
+    def __init__(self, filepath):
+        self.terminal = sys.stdout
+        self.log = open(filepath, 'w', encoding='utf-8')
+        # ANSI escape sequence regex
+        self.ansi_escape = re.compile(r'\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])')
+        self.log_filtered = False
+
+    def write(self, message):
+        # Write to terminal (original content with colors)
+        self.terminal.write(message)
+        
+        # Filter logic for file output
+        # 1. Check for noisy tags
+        if "[CACHE]" in message or "[CAL]" in message:
+            self.log_filtered = True
+            return
+        
+        # 2. Check if this is a newline following a filtered log
+        if message == '\n' and self.log_filtered:
+            self.log_filtered = False
+            return
+            
+        # Reset filter flag for normal messages
+        self.log_filtered = False
+        
+        # 3. Strip ANSI codes
+        clean_message = self.ansi_escape.sub('', message)
+        
+        # 4. Write to file
+        self.log.write(clean_message)
+
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
 
 # =============================================================================
 # 共用功能函式
@@ -352,8 +395,8 @@ def process_tw_data():
                 _factor = float(_px_csv) / _px_yf
                 price_data_tw[_s] = price_data_tw[_s] * _factor
                 _cal_info.append((_s, str(_d0.date()), float(_px_csv), float(_px_yf), float(_factor)))
-        if _cal_info:
-            print("[CAL] TWD price calibration applied:", _cal_info[:5], "...")
+            if _cal_info:
+                print(f"[CAL] TWD price calibration applied: {_cal_info[:5]} ...")
     except Exception as _e:
         print("[CAL][WARN]", _e)
 
@@ -692,6 +735,9 @@ def _process_stock_twr(res_data, region, plt_obj):
 # 主程式：整合 TW 與 US 資料，產出 USD 與 TWD 版本報告、圖表及風險報酬散點圖
 # =============================================================================
 def main():
+    # Redirect stdout to both terminal and a file
+    sys.stdout = DualLogger('output/report.txt')
+
     twd_to_usd = get_twd_to_usd_rate()    
     usd_to_twd = 1 / twd_to_usd             
     
