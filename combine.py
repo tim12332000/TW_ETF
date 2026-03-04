@@ -19,6 +19,10 @@ from scipy.stats import norm
 from matplotlib import rcParams
 from tabulate import tabulate
 
+# Global Counters for logging
+CACHE_LOADS = 0
+CACHE_MISSES = 0
+CALIBRATIONS = 0
 # =============================================================================
 # Cache Settings
 # =============================================================================
@@ -40,6 +44,7 @@ def get_cached_data(key_name, fetch_func, *args, **kwargs):
     
     filepath = os.path.join(CACHE_DIR, safe_key)
     
+    global CACHE_LOADS, CACHE_MISSES
     # Check cache
     if os.path.exists(filepath):
         # Check age
@@ -47,15 +52,15 @@ def get_cached_data(key_name, fetch_func, *args, **kwargs):
         if (time.time() - mtime) < 86400: # 1 day in seconds
             try:
                 with open(filepath, 'rb') as f:
-                    print(f"[CACHE] Loaded {key_name}")
+                    CACHE_LOADS += 1
                     return pickle.load(f)
             except Exception as e:
-                print(f"[CACHE] Error reading {filepath}: {e}, refreshing...")
+                pass # Silent fallback
         else:
-             print(f"[CACHE] {key_name} expired, refreshing...")
+             pass # Expired
     
     # Fetch data
-    print(f"[FETCH] Fetching {key_name}...")
+    CACHE_MISSES += 1
     data = fetch_func(*args, **kwargs)
     
     # Save to cache
@@ -399,10 +404,12 @@ def process_tw_data():
                 _factor = float(_px_csv) / _px_yf
                 price_data_tw[_s] = price_data_tw[_s] * _factor
                 _cal_info.append((_s, str(_d0.date()), float(_px_csv), float(_px_yf), float(_factor)))
-            if _cal_info:
-                print(f"[CAL] TWD price calibration applied: {_cal_info[:5]} ...")
+        if _cal_info:
+            global CALIBRATIONS
+            CALIBRATIONS += len(_cal_info)
+            _cal_info = [] # clear after counting
     except Exception as _e:
-        print("[CAL][WARN]", _e)
+        pass
 
     price_data_tw = price_data_tw * twd_to_usd
 
@@ -734,6 +741,106 @@ def _process_stock_twr(res_data, region, plt_obj):
             print(f"Error calculating TWR for {sym}: {e}")
 
 
+
+# =============================================================================
+# 目標配置與再平衡建議
+# =============================================================================
+def print_rebalance_recommendation(portfolio_df_combined, usd_to_twd):
+    """
+    Calculates and prints the target portfolio allocation vs current.
+    Target: QLD(30%), SPLG/SPYM(25%), 0050正2 [00631L.TW](15%), 台灣50 [0050.TW](30%)
+    Excludes Puts from computation.
+    """
+    targets = {
+        'QLD': 0.30,
+        'SPLG / SPYM': 0.25,
+        '00631L': 0.15,
+        '006208': 0.30
+    }
+    
+    current_values_usd = {k: 0.0 for k in targets.keys()}
+    current_values_usd['Other (其他)'] = 0.0
+    
+    total_pool_usd = 0.0
+    
+    for _, row in portfolio_df_combined.iterrows():
+        sym = str(row['Symbol'])
+        qty = float(row['Quantity_now'])
+        val_usd = float(pd.to_numeric(row['Price_Total'], errors='coerce'))
+        
+        if pd.isna(val_usd) or qty == 0:
+            continue
+            
+        # Exclude Puts
+        if 'P' in sym and any(c.isdigit() for c in sym):
+            if re.match(r"^([A-Z]+)(\d{6})P(\d{8})$", sym) or (('QQQ' in sym or 'TSM' in sym) and 'P' in sym):
+                continue
+                
+        total_pool_usd += val_usd
+        
+        matched = False
+        if 'QLD' in sym:
+            current_values_usd['QLD'] += val_usd
+            matched = True
+        elif 'SPLG' in sym or 'SPYM' in sym:
+            current_values_usd['SPLG / SPYM'] += val_usd
+            matched = True
+        elif '00631L' in sym:
+            current_values_usd['00631L'] += val_usd
+            matched = True
+        elif '006208' in sym:
+            current_values_usd['006208'] += val_usd
+            matched = True
+            
+        if not matched:
+            current_values_usd['Other (其他)'] += val_usd
+            
+    print("\n=== 目標配置與再平衡建議 (排除 Puts) ===")
+    
+    total_pool_twd = total_pool_usd * usd_to_twd
+    print(f"再平衡總資金池 (僅計股票部位): {total_pool_twd:,.0f} TWD")
+    
+    table_data = []
+    
+    for key, target_pct in targets.items():
+        curr_usd = current_values_usd[key]
+        curr_twd = curr_usd * usd_to_twd
+        
+        target_twd = total_pool_twd * target_pct
+        diff_twd = target_twd - curr_twd
+        
+        curr_pct = (curr_twd / total_pool_twd) * 100 if total_pool_twd > 0 else 0
+        
+        action_str = f"+{diff_twd:,.0f}" if diff_twd > 0 else f"{diff_twd:,.0f}"
+        if diff_twd > 0:
+            action_str = f"\033[92m{action_str}\033[0m" # Green
+        elif diff_twd < 0:
+            action_str = f"\033[91m{action_str}\033[0m" # Red
+            
+        table_data.append([
+            key, 
+            f"{target_pct*100:.1f}%", 
+            f"{curr_pct:.1f}%", 
+            f"{curr_twd:,.0f}", 
+            f"{target_twd:,.0f}", 
+            action_str
+        ])
+        
+    if current_values_usd['Other (其他)'] > 0:
+        curr_other_twd = current_values_usd['Other (其他)'] * usd_to_twd
+        curr_other_pct = (curr_other_twd / total_pool_twd) * 100 if total_pool_twd > 0 else 0
+        action_str = f"\033[91m-{curr_other_twd:,.0f}\033[0m"
+        table_data.append([
+            'Other (其他)', 
+            "0.0%", 
+            f"{curr_other_pct:.1f}%", 
+            f"{curr_other_twd:,.0f}", 
+            "0", 
+            action_str
+        ])
+        
+    headers = ["標的", "目標佔比", "當前佔比", "當前金額 (TWD)", "目標金額 (TWD)", "建議動作 (TWD)"]
+    print(tabulate(table_data, headers=headers, tablefmt="psql", stralign="right"))
 
 # =============================================================================
 # 主程式：整合 TW 與 US 資料，產出 USD 與 TWD 版本報告、圖表及風險報酬散點圖
@@ -1137,6 +1244,10 @@ def main():
 
     print("\n=== 綜合投資組合股票明細 (TWD) ===")
     print(tabulate(portfolio_df_combined, headers='keys', tablefmt='psql', showindex=False))
+    
+    # 輸出目標配置與再平衡建議
+    print_rebalance_recommendation(portfolio_df_combined, usd_to_twd)
+    
     # ~~ 此區塊已後移至 transactions_df/cashline 之後 ~~
 # === 2. 想比較的指數／ETF／個股清單（可自行增刪） ===
     COMPARE_TICKERS = ['SPY','QQQ','EWT']#['SPY','QQQ','QLD','TQQQ','SQQQ','VT','EWT','GLD','TLT','SHY','BRK-B']
@@ -1498,6 +1609,15 @@ def main():
     # Output Put Protection Analysis
     analyze_put_protection(portfolio_df_combined)
 
+    # ----------------------
+    # 執行摘要報告
+    # ----------------------
+    print("\n==================================================")
+    print("Execution Summary:")
+    print(f"  - Cache Loads: {CACHE_LOADS}")
+    print(f"  - Cache Misses (Network Fetches): {CACHE_MISSES}")
+    print(f"  - Price Calibrations Applied: {CALIBRATIONS}")
+    print("==================================================")
 
 
 if __name__ == '__main__':
