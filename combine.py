@@ -9,9 +9,13 @@ import os
 import matplotlib.pyplot as plt
 from datetime import datetime
 import time
+
+# Set CWD to script directory
+os.chdir(os.path.dirname(os.path.abspath(__file__)))
 import pickle
 import hashlib
 from scipy.optimize import newton
+from scipy.stats import norm
 from matplotlib import rcParams
 from tabulate import tabulate
 
@@ -734,7 +738,261 @@ def _process_stock_twr(res_data, region, plt_obj):
 # =============================================================================
 # 主程式：整合 TW 與 US 資料，產出 USD 與 TWD 版本報告、圖表及風險報酬散點圖
 # =============================================================================
+
+# =============================================================================
+# 新增：QQQ Put 保護力分析
+# =============================================================================
+def black_scholes_put(S, K, T, r, sigma):
+    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
+    d2 = d1 - sigma * np.sqrt(T)
+    put_price = K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
+    return put_price
+
+def analyze_put_protection(portfolio_df):
+    """
+    Analyzes Put protection based on current portfolio composition.
+    Supports multiple Puts (e.g. QQQ, TSM).
+    portfolio_df: DataFrame with columns ['Symbol', 'Quantity_now', 'Price_Total', ...]
+                  Price_Total should be in USD.
+    """
+    # 1. Identify Assets
+    high_beta_tickers = ['QLD', '00631L.TW', 'TQQQ', 'SOXL', 'TECL', 'NVDL']
+    hedge_tickers = ['EDV', 'TLT', 'TMF', 'ZROZ', 'UBT']
+    
+    # Normalize symbols for matching
+    df = portfolio_df.copy()
+    
+    high_beta_val = 0
+    market_beta_val = 0
+    hedge_val = 0
+    total_stock_val = 0
+    
+    put_contracts = []
+    
+    for _, row in df.iterrows():
+        sym = str(row['Symbol'])
+        val = float(row['Price_Total'])
+        qty = float(row['Quantity_now'])
+        
+        # Check if Put
+        # Pattern: Underlying + YYMMDD + P + Strike
+        if 'P' in sym and any(c.isdigit() for c in sym) and qty > 0:
+            m = re.match(r"^([A-Z]+)(\d{6})P(\d{8})$", sym)
+            if m:
+                put_contracts.append(row)
+                continue
+            # Backup: if it contains QQQ or TSM and P but different format
+            if ('QQQ' in sym or 'TSM' in sym) and 'P' in sym: 
+                put_contracts.append(row)
+                continue
+            
+        total_stock_val += val
+        
+        # Categorize
+        is_high = False
+        for hb in high_beta_tickers:
+            if hb.split('.')[0] in sym:
+                high_beta_val += val
+                is_high = True
+                break
+        
+        if is_high: continue
+        
+        is_hedge = False
+        for h in hedge_tickers:
+            if h in sym:
+                hedge_val += val
+                is_hedge = True
+                break
+        
+        if is_hedge: continue
+        
+        # Default to market beta
+        market_beta_val += val
+
+    # Setup Put Details
+    if not put_contracts:
+        return
+
+    puts_info = []
+    for put in put_contracts:
+        sym = put['Symbol']
+        m = re.match(r"^([A-Z]+)(\d{6})P(\d{8})$", sym)
+        if m:
+            underlying = m.group(1)
+            date_str = m.group(2)
+            strike_str = m.group(3)
+        else:
+            p_index = sym.find('P')
+            base = sym[:p_index]
+            date_str = base[-6:]
+            underlying = base[:-6]
+            strike_str = sym[p_index+1:]
+        
+        try:
+            strike = float(strike_str) / 1000.0
+            expiry = datetime.strptime(date_str, "%y%m%d")
+            contracts = float(put['Quantity_now']) / 100.0 
+            cost_basis = float(put['Cost'])
+            
+            # Underlying price
+            try:
+                hist = yf.Ticker(underlying).history(period="1d")
+                s0 = hist['Close'].iloc[-1]
+            except:
+                s0 = 610.0 if underlying == 'QQQ' else 200.0 # fallback
+                
+            puts_info.append({
+                'sym': sym,
+                'underlying': underlying,
+                'strike': strike,
+                'expiry': expiry,
+                'contracts': contracts,
+                'cost_basis': cost_basis,
+                's0': s0
+            })
+        except:
+            continue
+
+    if not puts_info:
+        return
+
+    # Parameters
+    today = datetime.now()
+    r = 0.045 # Risk free
+    
+    # Total Portfolio Value (Use calculated sum)
+    PORTFOLIO_TOTAL = total_stock_val
+    
+    # Scenarios
+    scenarios = [
+        {"drop": 0.0, "desc": "Current (目前)"},
+        {"drop": -0.10, "desc": "Correction (回調)"},
+        {"drop": -0.20, "desc": "Bear Market (熊市)"},
+        {"drop": -0.30, "desc": "Crash (崩盤)"},
+        {"drop": -0.40, "desc": "Crisis (金融危機)"},
+        {"drop": -0.50, "desc": "Collapse (毀滅)"},
+    ]
+
+    print("\n=== Put 保護力分析 (總資產預估) ===")
+    for p_info in puts_info:
+        print(f"Put: {p_info['sym']}, Strike ${p_info['strike']}, Exp {p_info['expiry'].strftime('%Y-%m-%d')} (Underlying: {p_info['underlying']} @ ${p_info['s0']:.2f})")
+    print(f"總資產 (股票): ${PORTFOLIO_TOTAL:,.0f} USD")
+    print("| 情境 | 基準跌幅 | 總資產 (無保) | 總資產 (有保) | Puts 總價值 | 保護效果 |")
+    print("| :--- | :--- | :--- | :--- | :--- | :--- |")
+
+    # For Charting
+    drops = np.linspace(0, -1.00, 100)
+    wealth_no_hedge = []
+    wealth_with_hedge = []
+
+    # Table Loop
+    for sc in scenarios:
+        drop = sc['drop']
+        
+        # Portfolio Loss
+        drop_2x = drop * 2.0 # Simplify
+        if drop_2x < -0.99: drop_2x = -0.99
+        
+        new_high = high_beta_val * (1 + drop_2x)
+        
+        bond_change = 0.0
+        if drop <= -0.20: bond_change = 0.05
+        if drop <= -0.30: bond_change = 0.15
+        new_hedge = hedge_val * (1 + bond_change)
+        
+        new_market = market_beta_val * (1 + drop)
+        
+        new_total_no_put = new_high + new_hedge + new_market
+        
+        # Total Puts Value
+        total_put_val = 0
+        for p in puts_info:
+            if p['expiry'] <= today:
+                continue
+            days_to_exp = (p['expiry'] - today).days
+            T = days_to_exp / 365.0
+            
+            # Assuming the underlying drops by the same 'drop' percentage
+            new_u = p['s0'] * (1 + drop)
+            vol = 0.20 + abs(drop) * 0.8
+            put_val_share = black_scholes_put(new_u, p['strike'], T, r, vol)
+            total_put_val += put_val_share * 100 * p['contracts']
+            
+        new_total_with_put = new_total_no_put + total_put_val
+        diff = new_total_with_put - new_total_no_put
+        
+        print(f"| {sc['desc']} | {drop*100:.0f}% | ${new_total_no_put:,.0f} | **${new_total_with_put:,.0f}** | ${total_put_val:,.0f} | +${diff:,.0f} |")
+
+    # Chart Data Loop
+    for drop in drops:
+        drop_2x = drop * 2.0
+        if drop_2x < -0.99: drop_2x = -0.99
+        new_high = high_beta_val * (1 + drop_2x)
+        bond_ch = 0.0
+        if drop <= -0.20: bond_ch = 0.05
+        if drop <= -0.30: bond_ch = 0.15
+        new_hedge = hedge_val * (1 + bond_ch)
+        new_market = market_beta_val * (1 + drop)
+        
+        val_no = new_high + new_hedge + new_market
+        
+        total_pv = 0
+        for p in puts_info:
+            if p['expiry'] <= today: continue
+            days_to_exp = (p['expiry'] - today).days
+            T = days_to_exp / 365.0
+            new_u = p['s0'] * (1 + drop)
+            vol = 0.20 + abs(drop) * 0.8
+            pv_share = black_scholes_put(new_u, p['strike'], T, r, vol)
+            total_pv += pv_share * 100 * p['contracts']
+            
+        wealth_no_hedge.append(val_no)
+        wealth_with_hedge.append(val_no + total_pv)
+
+    # Plot
+    fig, ax1 = plt.subplots(figsize=(10, 6))
+    
+    ax1.plot(drops * 100, wealth_no_hedge, label='Total Assets (No Puts)', color='red', linewidth=2)
+    ax1.plot(drops * 100, wealth_with_hedge, label='Total Assets (With Puts)', color='blue', linewidth=2)
+    ax1.fill_between(drops * 100, wealth_no_hedge, wealth_with_hedge, color='green', alpha=0.1, label='Protection')
+    
+    ax1.set_title('Total Asset Protection (Market Drop)')
+    ax1.set_xlabel('Market Drop (%)')
+    ax1.set_ylabel('Total Asset Value (USD)')
+    ax1.grid(True, alpha=0.3)
+    
+    payouts = np.array(wealth_with_hedge) - np.array(wealth_no_hedge)
+    
+    # Secondary axis for Puts Payout
+    ax2 = ax1.twinx()
+    ax2.plot(drops * 100, payouts, label='Puts Payout Value', color='purple', linestyle='--', linewidth=2)
+    ax2.set_ylabel('Puts Value (USD)', color='purple')
+    ax2.tick_params(axis='y', labelcolor='purple')
+    
+    # Combine legends from both axes
+    lines_1, labels_1 = ax1.get_legend_handles_labels()
+    lines_2, labels_2 = ax2.get_legend_handles_labels()
+    ax1.legend(lines_1 + lines_2, labels_1 + labels_2, loc='upper right')
+    
+    # Annotate
+    try:
+        idx = next(x for x, val in enumerate(payouts) if val > 1000)
+        start_drop = drops[idx] * 100
+        ax1.axvline(x=start_drop, color='orange', linestyle=':')
+        ax1.text(start_drop - 2, min(wealth_no_hedge)+5000, f'Starts ~{abs(start_drop):.0f}%', rotation=90, color='orange')
+    except:
+        pass
+        
+    plt.tight_layout()
+    plt.savefig('output/total_asset_protection.png')
+    plt.show() 
+    plt.close()
+    print("Chart saved to output/total_asset_protection.png")
+
 def main():
+    # Save original stdout to ensure we can restore it later
+    original_stdout = sys.stdout
     # Redirect stdout to both terminal and a file
     sys.stdout = DualLogger('output/report.txt')
 
@@ -857,9 +1115,23 @@ def main():
         lambda x: f"{x:,.2f}" if pd.notnull(x) else ""
     )
 
-    # 最後選欄位（將 AvgCost 插入 Price 之後）
+    # 新增：計算持股佔比 (對應%數)
+    portfolio_df_combined['Alloc_Price_Total'] = pd.to_numeric(portfolio_df_combined['Price_Total'], errors='coerce').fillna(0)
+    total_val_for_alloc = portfolio_df_combined.loc[portfolio_df_combined['Alloc_Price_Total'] > 0, 'Alloc_Price_Total'].sum()
+    
+    portfolio_df_combined['Alloc(%)'] = 0.0
+    if total_val_for_alloc > 0:
+        mask = portfolio_df_combined['Alloc_Price_Total'] > 0
+        portfolio_df_combined.loc[mask, 'Alloc(%)'] = (portfolio_df_combined.loc[mask, 'Alloc_Price_Total'] / total_val_for_alloc) * 100
+
+    portfolio_df_combined['Alloc(%)'] = portfolio_df_combined.apply(
+        lambda row: f"{row['Alloc(%)']:.2f}% ({row['Price_Total'] * usd_to_twd:,.0f})" if row['Alloc_Price_Total'] > 0 else "0.00% (0)",
+        axis=1
+    )
+
+    # 最後選欄位（將 AvgCost 插入 Price 之後，Alloc(%) 放在最後）
     portfolio_df_combined = portfolio_df_combined[
-        ['Symbol', 'Name', 'Quantity_now', 'Price', 'AvgCost', 'Price_Total', 'Cost', 'Gain(USD)', 'Gain(TWD)', 'Gain(%)']
+        ['Symbol', 'Name', 'Quantity_now', 'Price', 'AvgCost', 'Price_Total', 'Cost', 'Gain(USD)', 'Gain(TWD)', 'Gain(%)', 'Alloc(%)']
     ]
 	
 
@@ -1099,9 +1371,14 @@ def main():
     combined_df_chart = combined_df_chart[combined_df_chart['Price_Total'] > 0]
     combined_df_chart['Price_Total'] = pd.to_numeric(combined_df_chart['Price_Total'], errors='coerce')
     combined_df_chart['Price_Total_TWD'] = combined_df_chart['Price_Total'] * usd_to_twd
+    
+    total_pie_twd = combined_df_chart['Price_Total_TWD'].sum()
+    pie_labels = combined_df_chart.apply(
+        lambda row: f"{row['Name']} {row['Price_Total_TWD']/total_pie_twd*100:.1f}% ({row['Price_Total_TWD']:,.0f})", axis=1
+    )
+    
     plt.figure(figsize=(10,8))
-    plt.pie(combined_df_chart['Price_Total_TWD'], labels=combined_df_chart['Name'], 
-            autopct=lambda pct: f'{pct:.1f}%' if pct > 0 else '', startangle=140)
+    plt.pie(combined_df_chart['Price_Total_TWD'], labels=pie_labels, startangle=140)
     plt.title('資產圓餅圖')
     plt.axis('equal')
     plt.axis('equal')
@@ -1218,9 +1495,8 @@ def main():
     # Output individual stock performance
     plot_stock_performance(tw_result, us_result)
 
-
-
-
+    # Output Put Protection Analysis
+    analyze_put_protection(portfolio_df_combined)
 
 
 
