@@ -1,9 +1,10 @@
 import json
-import os
+from pathlib import Path
 
-nb_path = r'c:\Git\TW_ETF\qqq_qld_tqqq_hedge_backtest.ipynb'
+ROOT = Path(__file__).resolve().parents[1]
+nb_path = ROOT / 'qqq_qld_tqqq_hedge_backtest.ipynb'
 
-with open(nb_path, 'r', encoding='utf-8') as f:
+with nb_path.open('r', encoding='utf-8') as f:
     nb = json.load(f)
 
 # The new logic to insert
@@ -35,7 +36,7 @@ for cell in nb['cells']:
             break
 
 if found:
-    with open(nb_path, 'w', encoding='utf-8') as f:
+    with nb_path.open('w', encoding='utf-8') as f:
         json.dump(nb, f, indent=4, ensure_ascii=False) # standard indent for nbs
     print(f"Successfully updated {nb_path}")
 else:

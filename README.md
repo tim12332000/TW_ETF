@@ -9,6 +9,16 @@ A local portfolio analysis project for combined TW and US holdings.
 
 ## Project Structure
 
+- `portfolio/`: core portfolio logic and report orchestration
+- `research/`: exploratory analysis and strategy scripts
+- `tools/`: verification, debugging, and maintenance utilities
+- `tests/`: focused regression and behavior checks
+- `docs/`: project notes and design references
+- `cache/`: cached market data snapshots
+- `output/`: generated reports and charts
+
+## Core Modules
+
 - `portfolio/app.py`: application entry and orchestration
 - `portfolio/tw_portfolio.py`: TW portfolio pipeline
 - `portfolio/us_portfolio.py`: US portfolio pipeline
