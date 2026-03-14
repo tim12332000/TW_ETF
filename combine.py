@@ -120,6 +120,11 @@ class DualLogger:
         self.terminal.flush()
         self.log.flush()
 
+    def close(self):
+        self.flush()
+        if self.log and not self.log.closed:
+            self.log.close()
+
 # =============================================================================
 # 共用功能函式
 # =============================================================================
@@ -131,6 +136,45 @@ def clean_currency(x):
     except Exception as e:
         print(f"轉換 {x} 失敗: {e}")
         return None
+
+def build_cash_ledgers(df):
+    """
+    Split source transaction amounts into:
+    - transaction_cashflows: every cash-moving row from the broker export
+    - external_cashflows: only capital that actually came from outside
+
+    The current exports do not provide a clean deposit/withdrawal ledger, so
+    external inflows are inferred whenever account cash is insufficient to fund
+    negative cash movements. Sign convention matches the existing code:
+    negative = capital in, positive = capital out.
+    """
+    cash_df = df[['Date', 'Amount']].copy()
+    cash_df['Date'] = pd.to_datetime(cash_df['Date']).dt.normalize()
+    cash_df['Amount'] = pd.to_numeric(cash_df['Amount'], errors='coerce')
+    cash_df = cash_df.dropna(subset=['Amount']).sort_values('Date')
+    cash_df = cash_df[cash_df['Amount'] != 0]
+
+    transaction_cashflows = list(cash_df[['Date', 'Amount']].itertuples(index=False, name=None))
+
+    cash_balance = 0.0
+    external_cashflows = []
+    for row in cash_df.itertuples(index=False):
+        amt = float(row.Amount)
+        if amt > 0:
+            cash_balance += amt
+            continue
+
+        needed = -amt
+        if cash_balance >= needed:
+            cash_balance -= needed
+            continue
+
+        contribution = needed - cash_balance
+        external_cashflows.append((row.Date, -contribution))
+        cash_balance = 0.0
+
+    invested_capital = -sum(amount for _, amount in external_cashflows if amount < 0)
+    return transaction_cashflows, external_cashflows, invested_capital
 
 def fix_share_sign(row):
     action = str(row['Action']).lower()
@@ -203,7 +247,7 @@ def get_daily_price(stock_symbol, start_date, end_date, is_tw=True):
         return data['Close']
     except Exception as e:
         print(f"下載 {stock_symbol} 價格失敗: {e}")
-        return 0
+        return pd.DataFrame()
 
 def get_option_price(occ_symbol):
     try:
@@ -238,7 +282,72 @@ def get_option_price(occ_symbol):
         print(f"取得選擇權 {occ_symbol} 價格失敗: {e}")
         return None
 
-def get_current_price_yf(ticker, is_tw=True):
+def parse_occ_symbol(occ_symbol):
+    match = re.match(r"^([A-Z]{1,6})(\d{6})([CP])(\d{8})$", str(occ_symbol))
+    if not match:
+        return None
+    return {
+        'underlying': match.group(1),
+        'expiry': pd.Timestamp(datetime.strptime(match.group(2), "%y%m%d")),
+        'option_type': match.group(3),
+        'strike': float(match.group(4)) / 1000.0
+    }
+
+def build_option_history_series(occ_symbol, date_index):
+    meta = parse_occ_symbol(occ_symbol)
+    if meta is None or len(date_index) == 0:
+        return pd.Series(index=date_index, dtype=float)
+
+    underlying_prices = get_daily_price(
+        meta['underlying'],
+        date_index.min(),
+        date_index.max() + pd.Timedelta(days=1),
+        is_tw=False
+    )
+    if isinstance(underlying_prices, pd.DataFrame):
+        if meta['underlying'] in underlying_prices.columns:
+            underlying_prices = underlying_prices[meta['underlying']]
+        else:
+            underlying_prices = underlying_prices.iloc[:, 0]
+
+    if underlying_prices is None or len(underlying_prices) == 0:
+        return pd.Series(index=date_index, dtype=float)
+
+    underlying_prices = underlying_prices.reindex(date_index).ffill()
+    if meta['option_type'] == 'P':
+        option_series = (meta['strike'] - underlying_prices).clip(lower=0)
+    else:
+        option_series = (underlying_prices - meta['strike']).clip(lower=0)
+
+    option_series = option_series.astype(float)
+    option_series[date_index > meta['expiry']] = 0.0
+
+    current_price = get_option_price(occ_symbol)
+    if current_price is not None and pd.notna(current_price) and not option_series.empty:
+        option_series.iloc[-1] = max(float(current_price), float(option_series.iloc[-1]))
+
+    return option_series
+
+def get_latest_available_price(price_series, fallback=None):
+    try:
+        if price_series is not None:
+            valid = pd.Series(price_series).dropna()
+            if not valid.empty:
+                return float(valid.iloc[-1])
+    except Exception:
+        pass
+    return fallback
+
+def resolve_market_price(ticker, history_series=None, is_tw=True, prefer_history=True):
+    fallback_price = get_latest_available_price(history_series)
+    if prefer_history and fallback_price is not None and pd.notna(fallback_price):
+        return float(fallback_price)
+    live_price = get_current_price_yf(ticker, is_tw=is_tw, fallback_price=fallback_price)
+    if live_price is not None and pd.notna(live_price):
+        return float(live_price)
+    return fallback_price
+
+def get_current_price_yf(ticker, is_tw=True, fallback_price=None):
     try:
         if is_tw:
             ticker = convert_ticker(ticker)
@@ -250,7 +359,18 @@ def get_current_price_yf(ticker, is_tw=True):
             
         def _fetch_current():
             d = yf.Ticker(ticker)
-            p = d.info.get("regularMarketPrice")
+            p = None
+            try:
+                fast_info = getattr(d, 'fast_info', None)
+                if fast_info is not None:
+                    p = fast_info.get("lastPrice") or fast_info.get("regularMarketPrice")
+            except Exception:
+                p = None
+            if p is None:
+                try:
+                    p = d.info.get("regularMarketPrice")
+                except Exception:
+                    p = None
             if p is None:
                 h = d.history(period="1d")
                 if not h.empty:
@@ -261,10 +381,10 @@ def get_current_price_yf(ticker, is_tw=True):
         key = f"current_price_{ticker}.pkl"
         price = get_cached_data(key, _fetch_current)
         
-        return price
+        return price if price is not None else fallback_price
     except Exception as e:
         print(f"取得 {ticker} 價格失敗: {e}")
-        return None
+        return fallback_price
 
 def xnpv(rate, cashflows):
     t0 = min(date for date, _ in cashflows)
@@ -274,13 +394,13 @@ def xnpv(rate, cashflows):
 def xirr(cashflows, guess=0.1):
     return newton(lambda r: xnpv(r, cashflows), guess)
 
-def calculate_realized_gain(symbol, df):
+def calculate_total_pnl_for_closed_position(symbol, df):
     df_sym = df[df['Symbol'] == symbol]
     total_buy = -df_sym[df_sym['Action'].str.lower().isin(['買', 'buy'])]['Amount'].sum()
     total_sell = df_sym[df_sym['Action'].str.lower().isin(['賣', 'sell'])]['Amount'].sum()
-    realized_gain = total_sell - total_buy
-    realized_gain_pct = (realized_gain / total_buy * 100) if total_buy != 0 else 0
-    return total_buy, realized_gain, realized_gain_pct
+    total_pnl = total_sell - total_buy
+    total_pnl_pct = (total_pnl / total_buy * 100) if total_buy != 0 else 0
+    return total_buy, total_pnl, total_pnl_pct
 
 def get_twd_to_usd_rate():
     try:
@@ -369,6 +489,52 @@ def calculate_twr_series(portfolio_value_series, cashflow_list):
     cum_twr = (1 + twr_series).cumprod() - 1
     return cum_twr * 100
 
+def twr_to_daily_returns(twr_pct_series):
+    if twr_pct_series.empty:
+        return pd.Series(dtype=float)
+    wealth_index = 1 + (twr_pct_series / 100.0)
+    return wealth_index.pct_change().dropna()
+
+def calc_risk_metrics_from_twr(twr_pct_series, risk_free_rate=0.02):
+    ret = twr_to_daily_returns(twr_pct_series)
+    if ret.empty:
+        return np.nan, np.nan, np.nan, np.nan, np.nan
+
+    ann_vol = ret.std() * np.sqrt(252)
+    daily_rf = (1 + risk_free_rate) ** (1 / 252) - 1
+    excess_ret = ret - daily_rf
+
+    if ret.std() == 0:
+        sharpe = np.nan
+    else:
+        sharpe = np.sqrt(252) * (excess_ret.mean() / ret.std())
+
+    downside_returns = excess_ret.copy()
+    downside_returns[downside_returns > 0] = 0
+    downside_deviation = np.sqrt(np.mean(np.square(downside_returns))) if len(downside_returns) > 0 else np.nan
+    sortino = (
+        (excess_ret.mean() / downside_deviation) * np.sqrt(252)
+        if pd.notna(downside_deviation) and downside_deviation != 0
+        else np.nan
+    )
+
+    wealth_index = 1 + (twr_pct_series / 100.0)
+    run_max = wealth_index.cummax()
+    if run_max.max() == 0:
+        max_dd = 0
+    else:
+        drawdown = (wealth_index - run_max) / run_max
+        max_dd = abs(drawdown.min())
+
+    total_years = len(ret) / 252
+    if total_years <= 0 or wealth_index.iloc[-1] <= 0:
+        ann_return = np.nan
+    else:
+        ann_return = wealth_index.iloc[-1] ** (1 / total_years) - 1
+    calmar = ann_return / max_dd if pd.notna(ann_return) and max_dd != 0 else np.nan
+
+    return ann_vol * 100, max_dd * 100, sharpe, sortino, calmar
+
 # =============================================================================
 # 處理台股資料 (轉換為 USD 計價)
 # =============================================================================
@@ -392,22 +558,7 @@ def process_tw_data():
     twd_to_usd = get_twd_to_usd_rate()
     df_tw["Amount"] = df_tw["Amount"] * twd_to_usd
 
-    # ----------- 真實淨投入資金計算 (模擬帳戶現金流) -----------
-    df_tw_sorted = df_tw.sort_values("Date")
-    account_cash = 0
-    net_invested = 0
-    for _, row in df_tw_sorted.iterrows():
-        amt = row["Amount"]
-        if amt > 0:
-            account_cash += amt
-        else:
-            needed = -amt
-            if account_cash >= needed:
-                account_cash -= needed
-            else:
-                net_invested += (needed - account_cash)
-                account_cash = 0
-    invested_capital_tw = net_invested
+    transaction_cashflows_tw, external_cashflows_tw, invested_capital_tw = build_cash_ledgers(df_tw)
 
     start_date = df_tw['Date'].min()
     end_date = pd.Timestamp.today()
@@ -453,18 +604,19 @@ def process_tw_data():
 
     portfolio_value_tw = (cum_holdings * price_data_tw).sum(axis=1).fillna(0)
 
-    cashflows_tw = list(df_tw[['Date', 'Amount']].itertuples(index=False, name=None))
     net_holdings_tw = df_tw.groupby('Symbol')['Quantity'].sum()
     portfolio_snapshot_tw = 0
     for stock, shares in net_holdings_tw.items():
         if shares != 0:
-            price = get_current_price_yf(stock, is_tw=True)
+            fallback_price_usd = get_latest_available_price(price_data_tw.get(stock))
+            live_price_twd = get_current_price_yf(stock, is_tw=True)
+            price = live_price_twd * twd_to_usd if live_price_twd is not None else fallback_price_usd
             if price is not None:
-                portfolio_snapshot_tw += shares * (price * twd_to_usd)
+                portfolio_snapshot_tw += shares * price
     today = pd.Timestamp.today().normalize()
     # cashflows_tw.append((today, portfolio_snapshot_tw))
 
-    total_investment_tw = -df_tw[df_tw['Amount'] < 0]['Amount'].sum()
+    total_investment_tw = -sum(amount for _, amount in external_cashflows_tw if amount < 0)
     final_portfolio_value_tw = portfolio_value_tw.iloc[-1]
     total_profit_tw = final_portfolio_value_tw - invested_capital_tw
     total_profit_pct_tw = (total_profit_tw / invested_capital_tw) * 100 if invested_capital_tw != 0 else 0
@@ -487,30 +639,32 @@ def process_tw_data():
         aggregated_cost = -data_dict['cost']
         if count != 0:
             try:
-                ticker_obj = yf.Ticker(convert_ticker(stock_code))
-                current_price = ticker_obj.history(period='1d')['Close'].iloc[-1] * twd_to_usd
+                fallback_price_usd = get_latest_available_price(price_data_tw.get(stock_code))
+                live_price_twd = get_current_price_yf(stock_code, is_tw=True)
+                current_price = live_price_twd * twd_to_usd if live_price_twd is not None else fallback_price_usd
             except Exception as e:
                 print(f"Error fetching data for {stock_code}: {e}")
-                current_price = 0
-            current_value = current_price * count
+                current_price = get_latest_available_price(price_data_tw.get(stock_code))
+            current_value = current_price * count if pd.notna(current_price) else np.nan
             gain = current_value - aggregated_cost
             gain_per = (gain / aggregated_cost) * 100 if aggregated_cost != 0 else 0
         else:
-            total_buy, realized_gain, realized_gain_pct = calculate_realized_gain(stock_code, df_tw)
+            total_buy, total_pnl, total_pnl_pct = calculate_total_pnl_for_closed_position(stock_code, df_tw)
             current_price = np.nan
             current_value = np.nan
             aggregated_cost = total_buy
-            gain = realized_gain
-            gain_per = realized_gain_pct
+            gain = total_pnl
+            gain_per = total_pnl_pct
         data_list_tw.append([stock_code, name, count, current_price, current_value, aggregated_cost, gain, gain_per])
-    headers = ['Symbol', 'Name', 'Quantity_now', 'Price', 'Price_Total', 'Cost', 'Gain', 'Gain(%)']
+    headers = ['Symbol', 'Name', 'Quantity_now', 'Price', 'Price_Total', 'Cost', 'Total PnL', 'Total PnL(%)']
     portfolio_df_tw = pd.DataFrame(data_list_tw, columns=headers)
 
     return {
         'df': df_tw,
         'date_range': date_range,
         'portfolio_value': portfolio_value_tw,
-        'cashflows': cashflows_tw,
+        'transaction_cashflows': transaction_cashflows_tw,
+        'external_cashflows': external_cashflows_tw,
         'total_investment': total_investment_tw,
         'invested_capital': invested_capital_tw,
         'final_portfolio_value': final_portfolio_value_tw,
@@ -533,22 +687,7 @@ def process_us_data():
     df_us = df_us.apply(fix_share_sign, axis=1)
     df_us["Amount"] = df_us["Amount"].apply(clean_currency)
 
-    # ----------- 真實淨投入資金計算 (模擬帳戶現金流) -----------
-    df_us_sorted = df_us.sort_values("Date")
-    account_cash = 0
-    net_invested = 0
-    for _, row in df_us_sorted.iterrows():
-        amt = row["Amount"]
-        if amt > 0:
-            account_cash += amt
-        else:
-            needed = -amt
-            if account_cash >= needed:
-                account_cash -= needed
-            else:
-                net_invested += (needed - account_cash)
-                account_cash = 0
-    invested_capital_us = net_invested
+    transaction_cashflows_us, external_cashflows_us, invested_capital_us = build_cash_ledgers(df_us)
 
     start_date = df_us['Date'].min()
     end_date = pd.Timestamp.today()
@@ -571,26 +710,27 @@ def process_us_data():
         else:
              price_data_us = fetched_price_data
 
-    # Add missing option columns with 0 or last known values so pandas aligned multiply works
+    # Add option history using intrinsic-value approximation instead of a flat current-price fill.
     for s in symbols_us:
         if s not in price_data_us.columns:
-            opt_price = get_option_price(s)
-            price_data_us[s] = opt_price if opt_price is not None else 0.0
+            if re.match(r"^[A-Z]{1,6}\d{6}[CP]\d{8}$", str(s)):
+                price_data_us[s] = build_option_history_series(s, date_range)
+            else:
+                price_data_us[s] = np.nan
 
     portfolio_value_us = (cum_holdings * price_data_us).sum(axis=1).fillna(0)
 
-    cashflows_us = list(df_us[['Date', 'Amount']].itertuples(index=False, name=None))
     net_holdings_us = df_us.groupby('Symbol')['Quantity'].sum()
     portfolio_snapshot_us = 0
     for stock, shares in net_holdings_us.items():
         if shares != 0:
-            price = get_current_price_yf(stock, is_tw=False)
+            price = resolve_market_price(stock, history_series=price_data_us.get(stock), is_tw=False)
             if price is not None:
                 portfolio_snapshot_us += shares * price
     today = pd.Timestamp.today().normalize()
     # cashflows_us.append((today, portfolio_snapshot_us))
 
-    total_investment_us = -df_us[df_us['Amount'] < 0]['Amount'].sum()
+    total_investment_us = -sum(amount for _, amount in external_cashflows_us if amount < 0)
     final_portfolio_value_us = portfolio_value_us.iloc[-1]
     total_profit_us = final_portfolio_value_us - invested_capital_us
     total_profit_pct_us = (total_profit_us / invested_capital_us) * 100 if invested_capital_us != 0 else 0
@@ -615,35 +755,30 @@ def process_us_data():
         aggregated_cost = -data_dict['cost']
         if count != 0:
             try:
-                if re.match(r"^[A-Z]{1,6}\d{6}[CP]\d{8}$", str(stock_code)):
-                    current_price = get_option_price(stock_code)
-                    if current_price is None:
-                        current_price = 0
-                else:
-                    ticker_obj = yf.Ticker(stock_code)
-                    current_price = ticker_obj.history(period='1d')['Close'].iloc[-1]
+                current_price = resolve_market_price(stock_code, history_series=price_data_us.get(stock_code), is_tw=False)
             except Exception as e:
                 print(f"Error fetching data for {stock_code}: {e}")
-                current_price = 0
-            current_value = current_price * count
+                current_price = get_latest_available_price(price_data_us.get(stock_code))
+            current_value = current_price * count if pd.notna(current_price) else np.nan
             gain = current_value - aggregated_cost
             gain_per = (gain / aggregated_cost) * 100 if aggregated_cost != 0 else 0
         else:
-            total_buy, realized_gain, realized_gain_pct = calculate_realized_gain(stock_code, df_us)
+            total_buy, total_pnl, total_pnl_pct = calculate_total_pnl_for_closed_position(stock_code, df_us)
             current_price = np.nan
             current_value = np.nan
             aggregated_cost = total_buy
-            gain = realized_gain
-            gain_per = realized_gain_pct
+            gain = total_pnl
+            gain_per = total_pnl_pct
         data_list_us.append([stock_code, name, count, current_price, current_value, aggregated_cost, gain, gain_per])
-    headers = ['Symbol', 'Name', 'Quantity_now', 'Price', 'Price_Total', 'Cost', 'Gain', 'Gain(%)']
+    headers = ['Symbol', 'Name', 'Quantity_now', 'Price', 'Price_Total', 'Cost', 'Total PnL', 'Total PnL(%)']
     portfolio_df_us = pd.DataFrame(data_list_us, columns=headers)
 
     return {
         'df': df_us,
         'date_range': date_range,
         'portfolio_value': portfolio_value_us,
-        'cashflows': cashflows_us,
+        'transaction_cashflows': transaction_cashflows_us,
+        'external_cashflows': external_cashflows_us,
         'total_investment': total_investment_us,
         'invested_capital': invested_capital_us,
         'final_portfolio_value': final_portfolio_value_us,
@@ -701,13 +836,13 @@ def simulate_stock_full(cashflows, ticker='^SP500TR'):
     shares = 0.0
     for dt in px.index:
         price = px.loc[dt]
-        port_list.append(shares * price)
         if dt in daily_cf.index:
             cash  = daily_cf.loc[dt]
             delta = -cash / price
             if shares + delta < 0:
                 delta = -shares
             shares += delta
+        port_list.append(shares * price)
         shares_list.append(shares)
 
     portfolio = pd.Series(port_list,   index=px.index, name=f'{ticker}_Value')
@@ -885,6 +1020,12 @@ def print_rebalance_recommendation(portfolio_df_combined, usd_to_twd):
 # 新增：QQQ Put 保護力分析
 # =============================================================================
 def black_scholes_put(S, K, T, r, sigma):
+    if K <= 0:
+        return 0.0
+    if T <= 0 or sigma <= 0:
+        return max(K - S, 0.0)
+    if S <= 0:
+        return K * np.exp(-r * T)
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
     put_price = K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
@@ -1153,7 +1294,7 @@ def main():
     portfolio_value_us = us_result['portfolio_value'].reindex(date_index, method='ffill').fillna(0)
     combined_portfolio_value_us = portfolio_value_tw + portfolio_value_us
 
-    combined_cashflows = tw_result['cashflows'] + us_result['cashflows']
+    combined_external_cashflows = tw_result['external_cashflows'] + us_result['external_cashflows']
     total_investment_us = tw_result['total_investment'] + us_result['total_investment']
     invested_capital_us = tw_result['invested_capital'] + us_result['invested_capital']
     final_portfolio_value_us = combined_portfolio_value_us.iloc[-1]
@@ -1170,7 +1311,9 @@ def main():
     # --- 1-4. transactions_df + 累積投入資金線（提前建立，後續多張圖需要） ---
     transactions_df = pd.concat([tw_result['df'], us_result['df']])
     transactions_df['Date'] = pd.to_datetime(transactions_df['Date']).dt.normalize()
-    cf_df = transactions_df[['Date','Amount']].sort_values('Date')
+    cf_df = pd.DataFrame(combined_external_cashflows, columns=['Date', 'Amount']).sort_values('Date')
+    if cf_df.empty:
+        cf_df = pd.DataFrame({'Date': date_index, 'Amount': 0.0})
     daily_cf = (cf_df.groupby('Date')['Amount']
                    .sum()
                    .reindex(date_index, fill_value=0)
@@ -1178,26 +1321,16 @@ def main():
     daily_invested_capital = (-daily_cf).clip(lower=0)
     daily_invested_capital_twd = daily_invested_capital * usd_to_twd
 
-    # --- 1-5. 風險指標：Sortino / Calmar / Max Drawdown ---
-    annual_rf = 0.02
-    daily_rf = annual_rf / 252
-    daily_returns = combined_portfolio_value_us.pct_change().dropna()
-    excess_returns = daily_returns - daily_rf
-    downside_returns = excess_returns.copy()
-    downside_returns[downside_returns > 0] = 0
-    downside_deviation = np.sqrt(np.mean(np.square(downside_returns))) if len(downside_returns) > 0 else np.nan
-    sortino_ratio = (excess_returns.mean() / downside_deviation) * np.sqrt(252) if downside_deviation != 0 else np.nan
-
-    wealth_factor = combined_portfolio_value_us / invested_capital_us
-    running_max = wealth_factor.cummax()
-    drawdown_series = (wealth_factor - running_max) / running_max
-    max_drawdown = drawdown_series.min() * 100
-    annual_return = (final_portfolio_value_us / combined_portfolio_value_us.iloc[0])**(252/len(daily_returns)) - 1
-    calmar_ratio = annual_return / abs(max_drawdown) if max_drawdown != 0 else np.nan
+    # --- 1-5. 風險指標：以 cashflow-neutral TWR 路徑計算 ---
+    twr_series = calculate_twr_series(combined_portfolio_value_us, combined_external_cashflows)
+    ann_vol_main, max_dd_main, sharpe_main, sortino_ratio, calmar_ratio = calc_risk_metrics_from_twr(
+        twr_series,
+        risk_free_rate=0.02
+    )
 
     # --- 1-6. XIRR ---
     total_snapshot = tw_result['portfolio_snapshot'] + us_result['portfolio_snapshot']
-    xirr_cashflows = combined_cashflows + [(pd.Timestamp.today(), total_snapshot)]
+    xirr_cashflows = combined_external_cashflows + [(pd.Timestamp.today(), total_snapshot)]
     combined_irr = None
     try:
         combined_irr = xirr(xirr_cashflows)
@@ -1207,17 +1340,17 @@ def main():
     # --- 1-7. 個股明細表處理 ---
     portfolio_df_combined = pd.concat([tw_result['portfolio_df'], us_result['portfolio_df']], ignore_index=True)
     portfolio_df_combined = portfolio_df_combined.fillna(0)
-    portfolio_df_combined.rename(columns={'Gain': 'Gain(USD)'}, inplace=True)
-    portfolio_df_combined['Gain(TWD)'] = portfolio_df_combined['Gain(USD)'] * usd_to_twd
-    portfolio_df_combined['Gain(USD)'] = portfolio_df_combined['Gain(USD)'].apply(
+    portfolio_df_combined.rename(columns={'Total PnL': 'Total PnL(USD)'}, inplace=True)
+    portfolio_df_combined['Total PnL(TWD)'] = portfolio_df_combined['Total PnL(USD)'] * usd_to_twd
+    portfolio_df_combined['Total PnL(USD)'] = portfolio_df_combined['Total PnL(USD)'].apply(
         lambda x: f"\033[92m{float(x):,.2f}\033[0m" if float(x) > 0
                   else (f"\033[91m{float(x):,.2f}\033[0m" if float(x) < 0 else f"{float(x):,.2f}")
     )
-    portfolio_df_combined['Gain(TWD)'] = portfolio_df_combined['Gain(TWD)'].apply(
+    portfolio_df_combined['Total PnL(TWD)'] = portfolio_df_combined['Total PnL(TWD)'].apply(
         lambda x: f"\033[92m{float(x):,.2f}\033[0m" if float(x) > 0
                   else (f"\033[91m{float(x):,.2f}\033[0m" if float(x) < 0 else f"{float(x):,.2f}")
     )
-    portfolio_df_combined['Gain(%)'] = portfolio_df_combined['Gain(%)'].apply(
+    portfolio_df_combined['Total PnL(%)'] = portfolio_df_combined['Total PnL(%)'].apply(
         lambda x: f"\033[92m{float(x):,.2f}%\033[0m" if float(x) > 0
                   else (f"\033[91m{float(x):,.2f}%\033[0m" if float(x) < 0 else f"{float(x):,.2f}%")
     )
@@ -1246,7 +1379,7 @@ def main():
     )
 
     portfolio_df_combined = portfolio_df_combined[
-        ['Symbol', 'Name', 'Quantity_now', 'Price', 'AvgCost', 'Price_Total', 'Cost', 'Gain(USD)', 'Gain(TWD)', 'Gain(%)', 'Alloc(%)']
+        ['Symbol', 'Name', 'Quantity_now', 'Price', 'AvgCost', 'Price_Total', 'Cost', 'Total PnL(USD)', 'Total PnL(TWD)', 'Total PnL(%)', 'Alloc(%)']
     ]
 
     # --- 1-8. Benchmark 模擬 ---
@@ -1254,7 +1387,7 @@ def main():
 
     sim_portfolios = {}
     for tk in COMPARE_TICKERS:
-        sim_portfolios[tk], _ = simulate_stock_full(combined_cashflows, ticker=tk)
+        sim_portfolios[tk], _ = simulate_stock_full(combined_external_cashflows, ticker=tk)
 
     idx = combined_portfolio_value_us.index.copy()
     for p in sim_portfolios.values():
@@ -1265,7 +1398,6 @@ def main():
     sims  = {tk: p.reindex(idx).ffill() for tk, p in sim_portfolios.items()}
 
     # --- 1-9. TWR + Benchmark TWR ---
-    twr_series = calculate_twr_series(combined_portfolio_value_us, combined_cashflows)
 
     bench_twr = {}
     valid_idx = twr_series[twr_series != 0].index
@@ -1302,38 +1434,16 @@ def main():
 
     # --- 1-10. Benchmark 對照表計算 ---
     today = pd.Timestamp.today().normalize()
-    base_cf = [(d, amt) for (d, amt) in combined_cashflows if d < today]
+    base_cf = [(d, amt) for (d, amt) in combined_external_cashflows if d < today]
 
     def last_valid(series):
         return series.dropna().iloc[-1] if series.dropna().size else np.nan
-
-    def calc_risk_metrics_from_twr(twr_pct_series, risk_free_rate=0.03):
-        if twr_pct_series.empty:
-            return np.nan, np.nan, np.nan
-        wealth_index = 1 + (twr_pct_series / 100.0)
-        ret = wealth_index.pct_change().dropna()
-        if ret.empty:
-            return np.nan, np.nan, np.nan
-        ann_vol = ret.std() * np.sqrt(252)
-        daily_rf_inner = (1 + risk_free_rate) ** (1/252) - 1
-        excess_ret = ret - daily_rf_inner
-        if ret.std() == 0:
-            sharpe = np.nan
-        else:
-            sharpe = np.sqrt(252) * (excess_ret.mean() / ret.std())
-        run_max = wealth_index.cummax()
-        if run_max.max() == 0:
-            max_dd = 0
-        else:
-            drawdown = (wealth_index - run_max) / run_max
-            max_dd = abs(drawdown.min())
-        return ann_vol * 100, max_dd * 100, sharpe
 
     benchmark_rows = []
 
     # My Portfolio
     p_my = combined_portfolio_value_us
-    ann_vol_my, max_dd_my, sharpe_my = calc_risk_metrics_from_twr(twr_series)
+    ann_vol_my, max_dd_my, sharpe_my, _, _ = calc_risk_metrics_from_twr(twr_series)
 
     benchmark_rows.append([
         'My Portfolio',
@@ -1362,7 +1472,7 @@ def main():
         except Exception:
             sim_irr = np.nan
         if tk in bench_twr:
-            sim_vol, max_dd, sim_sharpe = calc_risk_metrics_from_twr(bench_twr[tk])
+            sim_vol, max_dd, sim_sharpe, _, _ = calc_risk_metrics_from_twr(bench_twr[tk])
         else:
             sim_vol, max_dd, sim_sharpe = np.nan, np.nan, np.nan
         benchmark_rows.append([
@@ -1381,7 +1491,7 @@ def main():
 
     # --- 2-1. 綜合資產報告 (USD) ---
     print("\n=== 綜合資產配置報告 (單位: USD) ===")
-    print(f"累積買入金額：{total_investment_us:,.2f} USD")
+    print(f"累積外部投入金額：{total_investment_us:,.2f} USD")
     print(f"實際淨投入資金：{invested_capital_us:,.2f} USD")
     print(f"最終組合市值：{final_portfolio_value_us:,.2f} USD")
     print(f"總獲利：{total_profit_us:,.2f} USD")
@@ -1393,7 +1503,7 @@ def main():
 
     # --- 2-2. 綜合資產報告 (TWD) ---
     print("\n=== 綜合資產配置報告 (單位: TWD) ===")
-    print(f"累積買入金額：{total_investment_twd:,.2f} TWD")
+    print(f"累積外部投入金額：{total_investment_twd:,.2f} TWD")
     print(f"實際淨投入資金：{invested_capital_twd:,.2f} TWD")
     print(f"最終組合市值：{final_portfolio_value_twd:,.2f} TWD")
     print(f"總獲利：{total_profit_twd:,.2f} TWD")
@@ -1553,6 +1663,11 @@ def main():
     print(f"  - Cache Misses (Network Fetches): {CACHE_MISSES}")
     print(f"  - Price Calibrations Applied: {CALIBRATIONS}")
     print("==================================================")
+
+    # --- Cleanup: 關閉 Logger 並恢復 stdout ---
+    if isinstance(sys.stdout, DualLogger):
+        sys.stdout.close()
+    sys.stdout = original_stdout
 
 
 if __name__ == '__main__':
