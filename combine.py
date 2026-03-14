@@ -29,6 +29,13 @@ CALIBRATIONS = 0
 CACHE_DIR = 'cache'
 if not os.path.exists(CACHE_DIR):
     os.makedirs(CACHE_DIR)
+YF_TZ_CACHE_DIR = os.path.join(CACHE_DIR, 'yfinance_tz_cache')
+if not os.path.exists(YF_TZ_CACHE_DIR):
+    os.makedirs(YF_TZ_CACHE_DIR)
+try:
+    yf.set_tz_cache_location(YF_TZ_CACHE_DIR)
+except Exception:
+    pass
 
 def get_cached_data(key_name, fetch_func, *args, **kwargs):
     """
@@ -394,6 +401,85 @@ def xnpv(rate, cashflows):
 def xirr(cashflows, guess=0.1):
     return newton(lambda r: xnpv(r, cashflows), guess)
 
+def _normalize_history_series(series_like):
+    if isinstance(series_like, pd.DataFrame):
+        if 'Close' in series_like.columns:
+            series_like = series_like['Close']
+        else:
+            series_like = series_like.iloc[:, 0]
+    series = pd.Series(series_like).copy()
+    if hasattr(series.index, 'tz') and series.index.tz is not None:
+        series.index = series.index.tz_localize(None)
+    series.index = pd.to_datetime(series.index).normalize()
+    return pd.to_numeric(series, errors='coerce').sort_index()
+
+def get_usd_twd_history(start_date=None, end_date=None):
+    """
+    Return USD/TWD historical closes (TWD per 1 USD) on a business-day index.
+    """
+    start_ts = pd.Timestamp(start_date).normalize() if start_date is not None else None
+    end_ts = pd.Timestamp(end_date).normalize() if end_date is not None else pd.Timestamp.today().normalize()
+    fetch_start = (start_ts - pd.Timedelta(days=10)) if start_ts is not None else None
+    fetch_end = end_ts + pd.Timedelta(days=1)
+
+    def _fetch_fx():
+        hist = yf.download('TWD=X', start=fetch_start, end=fetch_end, auto_adjust=False, progress=False)
+        if isinstance(hist, pd.DataFrame) and not hist.empty:
+            if 'Close' in hist.columns:
+                return hist['Close']
+            return hist.iloc[:, 0]
+        return pd.Series(dtype=float)
+
+    start_key = fetch_start.date() if fetch_start is not None else 'full'
+    key = f"usd_twd_hist_{start_key}_{fetch_end.date()}.pkl"
+    fx = _normalize_history_series(get_cached_data(key, _fetch_fx))
+    if fx.empty:
+        fx = _normalize_history_series(_fetch_fx())
+    if fx.empty:
+        try:
+            t = yf.Ticker('TWD=X')
+            rate = t.fast_info.get("lastPrice") if getattr(t, 'fast_info', None) is not None else None
+            if rate is None:
+                rate = t.info.get("regularMarketPrice")
+            if rate is None:
+                h = t.history(period="5d")
+                if not h.empty:
+                    rate = h["Close"].iloc[-1]
+            if rate is not None:
+                fx = pd.Series([float(rate)], index=[end_ts], dtype=float)
+        except Exception:
+            fx = pd.Series(dtype=float)
+
+    if fx.empty:
+        fallback = 30.0
+        idx = pd.date_range(start=start_ts or end_ts, end=end_ts, freq='B')
+        if idx.empty:
+            idx = pd.DatetimeIndex([end_ts])
+        return pd.Series(fallback, index=idx, dtype=float, name='USD_TWD')
+
+    target_start = start_ts if start_ts is not None else fx.index.min()
+    idx = pd.date_range(start=target_start, end=end_ts, freq='B')
+    if idx.empty:
+        idx = pd.DatetimeIndex([end_ts])
+    fx = fx.reindex(idx).ffill().bfill()
+    fx.name = 'USD_TWD'
+    return fx
+
+def align_fx_series(index_like, fx_series):
+    idx = pd.DatetimeIndex(pd.to_datetime(index_like)).normalize()
+    aligned = fx_series.reindex(idx).ffill().bfill()
+    aligned.index = idx
+    return aligned
+
+def convert_cashflows_to_twd(cashflows_usd, fx_series):
+    if not cashflows_usd:
+        return []
+    cf_df = pd.DataFrame(cashflows_usd, columns=['Date', 'Amount_USD'])
+    cf_df['Date'] = pd.to_datetime(cf_df['Date']).dt.normalize()
+    cf_df['USD_TWD'] = align_fx_series(cf_df['Date'], fx_series).values
+    cf_df['Amount_TWD'] = cf_df['Amount_USD'] * cf_df['USD_TWD']
+    return list(cf_df[['Date', 'Amount_TWD']].itertuples(index=False, name=None))
+
 def calculate_total_pnl_for_closed_position(symbol, df):
     df_sym = df[df['Symbol'] == symbol]
     total_buy = -df_sym[df_sym['Action'].str.lower().isin(['買', 'buy'])]['Amount'].sum()
@@ -404,17 +490,7 @@ def calculate_total_pnl_for_closed_position(symbol, df):
 
 def get_twd_to_usd_rate():
     try:
-        def _fetch_rate():
-            t = yf.Ticker('TWD=X')
-            r = t.info.get("regularMarketPrice")
-            if r is None:
-                h = t.history(period="1d")
-                if not h.empty:
-                    r = h["Close"].iloc[-1]
-            return r
-
-        rate = get_cached_data("rate_twd_usd.pkl", _fetch_rate)
-        
+        rate = float(get_usd_twd_history(end_date=pd.Timestamp.today().normalize()).iloc[-1])
         return 1.0 / rate
     except Exception as e:
         print("取得 TWD/USD 匯率失敗:", e)
@@ -553,16 +629,17 @@ def process_tw_data():
     df_tw.sort_values('Date', inplace=True)
     df_tw['Quantity'] = pd.to_numeric(df_tw['Quantity'], errors='coerce')
     df_tw = df_tw.apply(fix_share_sign, axis=1)
-    df_tw["Amount"] = df_tw["Amount"].apply(clean_currency)
-
-    twd_to_usd = get_twd_to_usd_rate()
-    df_tw["Amount"] = df_tw["Amount"] * twd_to_usd
-
-    transaction_cashflows_tw, external_cashflows_tw, invested_capital_tw = build_cash_ledgers(df_tw)
-
     start_date = df_tw['Date'].min()
     end_date = pd.Timestamp.today()
     date_range = pd.date_range(start=start_date, end=end_date, freq='B')
+    usd_twd_series = get_usd_twd_history(start_date, end_date)
+
+    df_tw["Amount"] = df_tw["Amount"].apply(clean_currency)
+    df_tw["Amount_TWD"] = df_tw["Amount"]
+    df_tw["USD_TWD"] = align_fx_series(df_tw['Date'], usd_twd_series).values
+    df_tw["Amount"] = df_tw["Amount_TWD"] / df_tw["USD_TWD"]
+
+    transaction_cashflows_tw, external_cashflows_tw, invested_capital_tw = build_cash_ledgers(df_tw)
 
     pivot = df_tw.pivot_table(index='Date', columns='Symbol', values='Quantity', aggfunc='sum')
     pivot = pivot.reindex(date_range, fill_value=0).fillna(0)
@@ -600,17 +677,20 @@ def process_tw_data():
     except Exception as _e:
         pass
 
-    price_data_tw = price_data_tw * twd_to_usd
+    price_data_tw_twd = price_data_tw.copy()
+    fx_on_date = align_fx_series(date_range, usd_twd_series)
+    price_data_tw = price_data_tw_twd.div(fx_on_date, axis=0)
 
     portfolio_value_tw = (cum_holdings * price_data_tw).sum(axis=1).fillna(0)
 
     net_holdings_tw = df_tw.groupby('Symbol')['Quantity'].sum()
     portfolio_snapshot_tw = 0
+    latest_usd_twd = float(usd_twd_series.iloc[-1])
     for stock, shares in net_holdings_tw.items():
         if shares != 0:
             fallback_price_usd = get_latest_available_price(price_data_tw.get(stock))
             live_price_twd = get_current_price_yf(stock, is_tw=True)
-            price = live_price_twd * twd_to_usd if live_price_twd is not None else fallback_price_usd
+            price = (live_price_twd / latest_usd_twd) if live_price_twd is not None else fallback_price_usd
             if price is not None:
                 portfolio_snapshot_tw += shares * price
     today = pd.Timestamp.today().normalize()
@@ -641,7 +721,7 @@ def process_tw_data():
             try:
                 fallback_price_usd = get_latest_available_price(price_data_tw.get(stock_code))
                 live_price_twd = get_current_price_yf(stock_code, is_tw=True)
-                current_price = live_price_twd * twd_to_usd if live_price_twd is not None else fallback_price_usd
+                current_price = (live_price_twd / latest_usd_twd) if live_price_twd is not None else fallback_price_usd
             except Exception as e:
                 print(f"Error fetching data for {stock_code}: {e}")
                 current_price = get_latest_available_price(price_data_tw.get(stock_code))
@@ -673,7 +753,9 @@ def process_tw_data():
         'portfolio_df': portfolio_df_tw,
         'portfolio_snapshot': portfolio_snapshot_tw,
         'price_data': price_data_tw,
-        'symbols': symbols_tw
+        'price_data_twd': price_data_tw_twd,
+        'symbols': symbols_tw,
+        'usd_twd_series': usd_twd_series
     }
 # =============================================================================
 # 處理美股資料 (以 USD 計價)
@@ -1283,18 +1365,21 @@ def main():
     sys.stdout = DualLogger('output/report.txt')
 
     # --- 1-2. 匯率 + TW/US 原始資料 ---
-    twd_to_usd = get_twd_to_usd_rate()
-    usd_to_twd = 1 / twd_to_usd
     tw_result = process_tw_data()
     us_result = process_us_data()
 
     # --- 1-3. 合併投組市值、現金流、投入資金 ---
     date_index = tw_result['portfolio_value'].index.union(us_result['portfolio_value'].index).sort_values()
+    usd_twd_series = get_usd_twd_history(date_index.min(), date_index.max())
+    latest_usd_twd = float(usd_twd_series.iloc[-1])
+    twd_to_usd = 1 / latest_usd_twd
+    usd_to_twd = latest_usd_twd
     portfolio_value_tw = tw_result['portfolio_value'].reindex(date_index, method='ffill').fillna(0)
     portfolio_value_us = us_result['portfolio_value'].reindex(date_index, method='ffill').fillna(0)
     combined_portfolio_value_us = portfolio_value_tw + portfolio_value_us
 
     combined_external_cashflows = tw_result['external_cashflows'] + us_result['external_cashflows']
+    combined_external_cashflows_twd = convert_cashflows_to_twd(combined_external_cashflows, usd_twd_series)
     total_investment_us = tw_result['total_investment'] + us_result['total_investment']
     invested_capital_us = tw_result['invested_capital'] + us_result['invested_capital']
     final_portfolio_value_us = combined_portfolio_value_us.iloc[-1]
@@ -1302,11 +1387,12 @@ def main():
     total_profit_pct_us = (total_profit_us / invested_capital_us) * 100 if invested_capital_us != 0 else 0
 
     # TWD 版本
-    combined_portfolio_value_twd = combined_portfolio_value_us * usd_to_twd
-    total_investment_twd = total_investment_us * usd_to_twd
-    invested_capital_twd = invested_capital_us * usd_to_twd
-    final_portfolio_value_twd = final_portfolio_value_us * usd_to_twd
-    total_profit_twd = total_profit_us * usd_to_twd
+    combined_portfolio_value_twd = combined_portfolio_value_us * align_fx_series(date_index, usd_twd_series)
+    total_investment_twd = -sum(amount for _, amount in combined_external_cashflows_twd if amount < 0)
+    invested_capital_twd = total_investment_twd
+    final_portfolio_value_twd = combined_portfolio_value_twd.iloc[-1]
+    total_profit_twd = final_portfolio_value_twd - invested_capital_twd
+    total_profit_pct_twd = (total_profit_twd / invested_capital_twd) * 100 if invested_capital_twd != 0 else 0
 
     # --- 1-4. transactions_df + 累積投入資金線（提前建立，後續多張圖需要） ---
     transactions_df = pd.concat([tw_result['df'], us_result['df']])
@@ -1319,12 +1405,24 @@ def main():
                    .reindex(date_index, fill_value=0)
                    .cumsum())
     daily_invested_capital = (-daily_cf).clip(lower=0)
-    daily_invested_capital_twd = daily_invested_capital * usd_to_twd
+    cf_df_twd = pd.DataFrame(combined_external_cashflows_twd, columns=['Date', 'Amount']).sort_values('Date')
+    if cf_df_twd.empty:
+        cf_df_twd = pd.DataFrame({'Date': date_index, 'Amount': 0.0})
+    daily_cf_twd = (cf_df_twd.groupby('Date')['Amount']
+                       .sum()
+                       .reindex(date_index, fill_value=0)
+                       .cumsum())
+    daily_invested_capital_twd = (-daily_cf_twd).clip(lower=0)
 
     # --- 1-5. 風險指標：以 cashflow-neutral TWR 路徑計算 ---
     twr_series = calculate_twr_series(combined_portfolio_value_us, combined_external_cashflows)
+    twr_series_twd = calculate_twr_series(combined_portfolio_value_twd, combined_external_cashflows_twd)
     ann_vol_main, max_dd_main, sharpe_main, sortino_ratio, calmar_ratio = calc_risk_metrics_from_twr(
         twr_series,
+        risk_free_rate=0.02
+    )
+    ann_vol_main_twd, max_dd_main_twd, sharpe_main_twd, sortino_ratio_twd, calmar_ratio_twd = calc_risk_metrics_from_twr(
+        twr_series_twd,
         risk_free_rate=0.02
     )
 
@@ -1336,12 +1434,17 @@ def main():
         combined_irr = xirr(xirr_cashflows)
     except Exception as e:
         print("綜合 XIRR 計算失敗:", e)
+    combined_irr_twd = None
+    try:
+        combined_irr_twd = xirr(combined_external_cashflows_twd + [(pd.Timestamp.today(), final_portfolio_value_twd)])
+    except Exception as e:
+        print("綜合 XIRR (TWD) 計算失敗:", e)
 
     # --- 1-7. 個股明細表處理 ---
     portfolio_df_combined = pd.concat([tw_result['portfolio_df'], us_result['portfolio_df']], ignore_index=True)
     portfolio_df_combined = portfolio_df_combined.fillna(0)
     portfolio_df_combined.rename(columns={'Total PnL': 'Total PnL(USD)'}, inplace=True)
-    portfolio_df_combined['Total PnL(TWD)'] = portfolio_df_combined['Total PnL(USD)'] * usd_to_twd
+    portfolio_df_combined['Total PnL(TWD)'] = portfolio_df_combined['Total PnL(USD)'] * latest_usd_twd
     portfolio_df_combined['Total PnL(USD)'] = portfolio_df_combined['Total PnL(USD)'].apply(
         lambda x: f"\033[92m{float(x):,.2f}\033[0m" if float(x) > 0
                   else (f"\033[91m{float(x):,.2f}\033[0m" if float(x) < 0 else f"{float(x):,.2f}")
@@ -1374,7 +1477,7 @@ def main():
         portfolio_df_combined.loc[mask, 'Alloc(%)'] = (portfolio_df_combined.loc[mask, 'Alloc_Price_Total'] / total_val_for_alloc) * 100
 
     portfolio_df_combined['Alloc(%)'] = portfolio_df_combined.apply(
-        lambda row: f"{row['Alloc(%)']:.2f}% ({row['Price_Total'] * usd_to_twd:,.0f})" if row['Alloc_Price_Total'] > 0 else "0.00% (0)",
+        lambda row: f"{row['Alloc(%)']:.2f}% ({row['Price_Total'] * latest_usd_twd:,.0f})" if row['Alloc_Price_Total'] > 0 else "0.00% (0)",
         axis=1
     )
 
@@ -1400,11 +1503,12 @@ def main():
     # --- 1-9. TWR + Benchmark TWR ---
 
     bench_twr = {}
-    valid_idx = twr_series[twr_series != 0].index
+    bench_twr_twd = {}
+    valid_idx = twr_series_twd[twr_series_twd != 0].index
     if not valid_idx.empty:
         start_date = valid_idx[0]
     else:
-        start_date = twr_series.index[0]
+        start_date = twr_series_twd.index[0]
 
     for tk in COMPARE_TICKERS:
         try:
@@ -1424,17 +1528,22 @@ def main():
                 _px = _px.iloc[:, 0]
 
             _px.index = _px.index.tz_localize(None)
-            _px = _px.reindex(twr_series.index).ffill().bfill()
+            _px = _px.reindex(twr_series_twd.index).ffill().bfill()
 
             start_val = _px.loc[start_date]
             if start_val > 0:
                  bench_twr[tk] = (_px / start_val - 1) * 100
+                 bench_px_twd = _px * align_fx_series(_px.index, usd_twd_series)
+                 bench_start_val_twd = bench_px_twd.loc[start_date]
+                 if bench_start_val_twd > 0:
+                     bench_twr_twd[tk] = (bench_px_twd / bench_start_val_twd - 1) * 100
         except Exception as e:
              print(f"Skipping benchmark TWR for {tk}: {e}")
 
     # --- 1-10. Benchmark 對照表計算 ---
     today = pd.Timestamp.today().normalize()
     base_cf = [(d, amt) for (d, amt) in combined_external_cashflows if d < today]
+    base_cf_twd = [(d, amt) for (d, amt) in combined_external_cashflows_twd if d < today]
 
     def last_valid(series):
         return series.dropna().iloc[-1] if series.dropna().size else np.nan
@@ -1443,14 +1552,14 @@ def main():
 
     # My Portfolio
     p_my = combined_portfolio_value_us
-    ann_vol_my, max_dd_my, sharpe_my, _, _ = calc_risk_metrics_from_twr(twr_series)
+    ann_vol_my, max_dd_my, sharpe_my, _, _ = calc_risk_metrics_from_twr(twr_series_twd)
 
     benchmark_rows.append([
         'My Portfolio',
-        p_my.iloc[-1] * usd_to_twd,
-        (p_my.iloc[-1] * usd_to_twd) - invested_capital_twd,
-        total_profit_pct_us,
-        combined_irr * 100 if combined_irr is not None else np.nan,
+        final_portfolio_value_twd,
+        final_portfolio_value_twd - invested_capital_twd,
+        total_profit_pct_twd,
+        combined_irr_twd * 100 if combined_irr_twd is not None else np.nan,
         ann_vol_my,
         max_dd_my,
         sharpe_my
@@ -1463,20 +1572,25 @@ def main():
         if np.isnan(final_us):
             print(f'[warning] {tk} 無可用資料，已略過')
             continue
-        final_twd  = final_us * usd_to_twd
+        final_twd  = final_us * latest_usd_twd
         profit_twd = final_twd - invested_capital_twd
         profit_pct = (profit_twd / invested_capital_twd) * 100
         cf_sim = base_cf + [(today, final_us)]
+        cf_sim_twd = base_cf_twd + [(today, final_twd)]
         try:
             sim_irr = xirr(cf_sim) * 100
         except Exception:
             sim_irr = np.nan
-        if tk in bench_twr:
-            sim_vol, max_dd, sim_sharpe, _, _ = calc_risk_metrics_from_twr(bench_twr[tk])
+        try:
+            sim_irr_twd = xirr(cf_sim_twd) * 100
+        except Exception:
+            sim_irr_twd = np.nan
+        if tk in bench_twr_twd:
+            sim_vol, max_dd, sim_sharpe, _, _ = calc_risk_metrics_from_twr(bench_twr_twd[tk])
         else:
             sim_vol, max_dd, sim_sharpe = np.nan, np.nan, np.nan
         benchmark_rows.append([
-            tk, final_twd, profit_twd, profit_pct, sim_irr, sim_vol, max_dd, sim_sharpe
+            tk, final_twd, profit_twd, profit_pct, sim_irr_twd, sim_vol, max_dd, sim_sharpe
         ])
 
     bench_headers = [
@@ -1496,6 +1610,9 @@ def main():
     print(f"最終組合市值：{final_portfolio_value_us:,.2f} USD")
     print(f"總獲利：{total_profit_us:,.2f} USD")
     print(f"總獲利百分比：{total_profit_pct_us:.2f}%")
+    print(f"AnnVol：{ann_vol_main:.2f}%")
+    print(f"MaxDD：{max_dd_main:.2f}%")
+    print(f"Sharpe：{sharpe_main:.2f}")
     print(f"Sortino Ratio：{sortino_ratio:.2f}")
     print(f"Calmar Ratio：{calmar_ratio:.2f}")
     if combined_irr is not None:
@@ -1507,9 +1624,14 @@ def main():
     print(f"實際淨投入資金：{invested_capital_twd:,.2f} TWD")
     print(f"最終組合市值：{final_portfolio_value_twd:,.2f} TWD")
     print(f"總獲利：{total_profit_twd:,.2f} TWD")
-    print(f"總獲利百分比：{total_profit_pct_us:.2f}%")
-    if combined_irr is not None:
-        print(f"綜合 XIRR: {combined_irr:.2%}")
+    print(f"總獲利百分比：{total_profit_pct_twd:.2f}%")
+    print(f"AnnVol：{ann_vol_main_twd:.2f}%")
+    print(f"MaxDD：{max_dd_main_twd:.2f}%")
+    print(f"Sharpe：{sharpe_main_twd:.2f}")
+    print(f"Sortino Ratio：{sortino_ratio_twd:.2f}")
+    print(f"Calmar Ratio：{calmar_ratio_twd:.2f}")
+    if combined_irr_twd is not None:
+        print(f"綜合 XIRR: {combined_irr_twd:.2%}")
 
     # --- 2-3. 個股明細表 ---
     print("\n=== 綜合投資組合股票明細 (TWD) ===")
@@ -1562,13 +1684,13 @@ def main():
 
     # --- 3-3. 累積報酬率比較 (TWR) ---
     plt.figure(figsize=(12, 6))
-    plt.plot(twr_series.index, twr_series, label='My Portfolio (TWR)', linewidth=2, color='blue')
+    plt.plot(twr_series_twd.index, twr_series_twd, label='My Portfolio (TWR, TWD)', linewidth=2, color='blue')
     plt.legend()
     plt.title('Portfolio Cumulative TWR Return')
     plt.grid(True)
     plt.savefig('output/twr_chart.png')
 
-    for tk, ser in bench_twr.items():
+    for tk, ser in bench_twr_twd.items():
         plt.plot(ser.index, ser, label=f'{tk}', alpha=0.7)
 
     plt.title('累積報酬率比較 (Time-Weighted Return)')
@@ -1595,7 +1717,7 @@ def main():
     plt.close()
 
     # --- 3-5. Drawdown 水下圖 ---
-    wealth_index = combined_portfolio_value_us / invested_capital_us
+    wealth_index = combined_portfolio_value_twd / invested_capital_twd if invested_capital_twd != 0 else combined_portfolio_value_twd * np.nan
     running_max_dd = wealth_index.cummax()
     drawdown = (wealth_index - running_max_dd) / running_max_dd
 
@@ -1616,7 +1738,7 @@ def main():
     combined_df_chart = portfolio_df_combined.dropna(subset=['Price_Total'])
     combined_df_chart = combined_df_chart[combined_df_chart['Price_Total'] > 0]
     combined_df_chart['Price_Total'] = pd.to_numeric(combined_df_chart['Price_Total'], errors='coerce')
-    combined_df_chart['Price_Total_TWD'] = combined_df_chart['Price_Total'] * usd_to_twd
+    combined_df_chart['Price_Total_TWD'] = combined_df_chart['Price_Total'] * latest_usd_twd
 
     total_pie_twd = combined_df_chart['Price_Total_TWD'].sum()
     pie_labels = combined_df_chart.apply(
