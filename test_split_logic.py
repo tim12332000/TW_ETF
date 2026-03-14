@@ -1,7 +1,7 @@
 import unittest
 import pandas as pd
 import numpy as np
-import combine
+import portfolio.app as portfolio_app
 from datetime import datetime, timedelta
 
 class TestQLDSplitLogic(unittest.TestCase):
@@ -15,7 +15,7 @@ class TestQLDSplitLogic(unittest.TestCase):
         end_date = "2025-11-25"
         
         # This function calls yfinance and applies our new un-adjustment logic
-        prices = combine.get_daily_price("QLD", start_date, end_date, is_tw=False)
+        prices = portfolio_app.get_daily_price("QLD", start_date, end_date, is_tw=False)
         
         # 2025-11-19 was the last day before split. 
         # 2025-11-20 was the split date (2-for-1).
@@ -70,7 +70,7 @@ class TestQLDSplitLogic(unittest.TestCase):
         The user's CSV *HAS* a Stock Split entry!
         Line 195: 2025/11/20,Stock Split,QLD,130,,0
         
-        Let's check `combine.py` handling of 'Stock Split'.
+        Let's check `portfolio.app` handling of 'Stock Split'.
         The function `process_us_data` reads CSV, does `pivot`.
         `pivot` uses `Quantity`.
         
@@ -88,7 +88,7 @@ class TestQLDSplitLogic(unittest.TestCase):
         
         BUT, yfinance by default returns Adjusted Close for history, meaning Past Prices are downgraded.
         YF Default: Nov 19 Price = 67.5 (Adjusted).
-        If we didn't fix `combine.py`:
+        If we didn't fix `portfolio.app`:
         Pre-Split Value = 130 (Holding) * 67.5 (YF Adj Price) = 8775.
         Real Value was 17550.
         So we had a massive fake DROP in history before split? No, usually Adjustment applies to WHOLE history.
@@ -108,7 +108,7 @@ class TestQLDSplitLogic(unittest.TestCase):
         
         # We need to run the full process
         # This might be slow but it is necessary for integration test
-        result = combine.process_us_data()
+        result = portfolio_app.process_us_data()
         portfolio_val = result['portfolio_value']
         
         try:

@@ -1,7 +1,7 @@
 
 import pandas as pd
 import numpy as np
-import combine
+import portfolio.app as app
 import matplotlib.pyplot as plt
 
 # Patching plt.show to do nothing so we don't block
@@ -10,17 +10,17 @@ def dummy_show():
 plt.show = dummy_show
 plt.savefig = dummy_show
 
-print("Running combine.main() to capture data...")
+print("Running app.main() to capture data...")
 try:
     # We might need to mock some inputs if main() is too heavy or interactive, 
     # but based on code it seems self-contained reading from CSVs.
     
     # Run user's logic
-    twd_to_usd = combine.get_twd_to_usd_rate()
+    twd_to_usd = app.get_twd_to_usd_rate()
     usd_to_twd = 1 / twd_to_usd
     
-    tw_result = combine.process_tw_data()
-    us_result = combine.process_us_data()
+    tw_result = app.process_tw_data()
+    us_result = app.process_us_data()
     
     date_index = tw_result['portfolio_value'].index.union(us_result['portfolio_value'].index).sort_values()
     portfolio_value_tw = tw_result['portfolio_value'].reindex(date_index, method='ffill').fillna(0)
@@ -28,7 +28,7 @@ try:
     combined_portfolio_value_us = portfolio_value_tw + portfolio_value_us
     combined_cashflows = tw_result['cashflows'] + us_result['cashflows']
     
-    twr_series = combine.calculate_twr_series(combined_portfolio_value_us, combined_cashflows)
+    twr_series = app.calculate_twr_series(combined_portfolio_value_us, combined_cashflows)
     
     print("\n=== TWR Series Stats ===")
     print(twr_series.describe())
@@ -63,9 +63,9 @@ try:
                 return yf.download(tk, start=start_date, end=None, progress=False, auto_adjust=True)
             
             # We can't easily access the inner cache logic of combine without modifying it 
-            # or replicating `get_cached_data`. combine.get_cached_data is available.
+            # or replicating `get_cached_data`. app.get_cached_data is available.
             key = f"bench_twr_{tk}_{start_date.date()}.pkl"
-            _px = combine.get_cached_data(key, _fetch_bench)
+            _px = app.get_cached_data(key, _fetch_bench)
             
             if isinstance(_px, pd.DataFrame):
                  if 'Close' in _px.columns:

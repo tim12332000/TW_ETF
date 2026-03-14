@@ -1,7 +1,7 @@
 import numpy as np
 import pandas as pd
 
-import combine
+import portfolio.app as app
 
 
 def assert_close(name, left, right, atol=1e-6, rtol=1e-6):
@@ -13,12 +13,12 @@ def assert_close(name, left, right, atol=1e-6, rtol=1e-6):
 
 
 def main():
-    tw = combine.process_tw_data()
-    us = combine.process_us_data()
+    tw = app.process_tw_data()
+    us = app.process_us_data()
 
     date_index = tw["portfolio_value"].index.union(us["portfolio_value"].index).sort_values()
-    usd_twd = combine.get_usd_twd_history(date_index.min(), date_index.max())
-    fx_on_date = combine.align_fx_series(date_index, usd_twd)
+    usd_twd = app.get_usd_twd_history(date_index.min(), date_index.max())
+    fx_on_date = app.align_fx_series(date_index, usd_twd)
     latest_usd_twd = float(usd_twd.iloc[-1])
 
     tw_non_null = tw["df"].dropna(subset=["Amount", "Amount_TWD", "USD_TWD"]).copy()
@@ -40,11 +40,11 @@ def main():
     assert_close("Portfolio TWD valuation", portfolio_value_twd, portfolio_value_us * fx_on_date, atol=1e-6, rtol=1e-6)
 
     combined_external_cashflows = tw["external_cashflows"] + us["external_cashflows"]
-    combined_external_cashflows_twd = combine.convert_cashflows_to_twd(combined_external_cashflows, usd_twd)
-    twr_usd = combine.calculate_twr_series(portfolio_value_us, combined_external_cashflows)
-    twr_twd = combine.calculate_twr_series(portfolio_value_twd, combined_external_cashflows_twd)
-    risk_usd = combine.calc_risk_metrics_from_twr(twr_usd)
-    risk_twd = combine.calc_risk_metrics_from_twr(twr_twd)
+    combined_external_cashflows_twd = app.convert_cashflows_to_twd(combined_external_cashflows, usd_twd)
+    twr_usd = app.calculate_twr_series(portfolio_value_us, combined_external_cashflows)
+    twr_twd = app.calculate_twr_series(portfolio_value_twd, combined_external_cashflows_twd)
+    risk_usd = app.calc_risk_metrics_from_twr(twr_usd)
+    risk_twd = app.calc_risk_metrics_from_twr(twr_twd)
 
     if np.isnan(np.asarray(risk_usd[:3], dtype=float)).all():
         raise AssertionError("USD risk metrics are all NaN")
