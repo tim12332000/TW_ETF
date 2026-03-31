@@ -9,7 +9,6 @@ from matplotlib import rcParams
 from scipy.stats import norm
 from tabulate import tabulate
 
-from .performance import calculate_twr_series
 
 rcParams['font.sans-serif'] = ['Microsoft YaHei']
 rcParams['axes.unicode_minus'] = False
@@ -19,7 +18,7 @@ def plot_stock_performance(tw_res, us_res):
     plt.figure(figsize=(14, 8))
     _process_stock_twr(tw_res, 'TW', plt)
     _process_stock_twr(us_res, 'US', plt)
-    plt.title('Individual Stock Performance (TWR %)')
+    plt.title('Individual Stock Performance (Equity Return %)')
     plt.xlabel('Date')
     plt.ylabel('Cumulative Return (%)')
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='small', ncol=1)
@@ -36,14 +35,19 @@ def _process_stock_twr(res_data, region, plt_obj):
     price_df = res_data['price_data']
     date_range = res_data['date_range']
     symbols = res_data['symbols']
+    option_pattern = re.compile(r'^[A-Z]{1,6}\d{6}[CP]\d{8}$')
 
     for sym in symbols:
+        if option_pattern.match(str(sym)):
+            continue
         sym_tx = df_tx[df_tx['Symbol'] == sym].copy()
         if sym_tx.empty:
             continue
 
         daily_quantity = sym_tx.groupby('Date')['Quantity'].sum()
         shares_series = daily_quantity.reindex(date_range).fillna(0).cumsum()
+        daily_amount = pd.to_numeric(sym_tx.groupby('Date')['Amount'].sum(), errors='coerce')
+        cash_series = daily_amount.reindex(date_range).fillna(0).cumsum()
 
         price_col = None
         if sym in price_df.columns:
@@ -53,22 +57,34 @@ def _process_stock_twr(res_data, region, plt_obj):
         if price_col is None:
             continue
 
-        combined_df = pd.DataFrame({'Shares': shares_series, 'Price': price_df[price_col]})
+        combined_df = pd.DataFrame({'Shares': shares_series, 'Cash': cash_series, 'Price': price_df[price_col]})
         combined_df = combined_df.dropna(subset=['Price'])
         combined_df['Shares'] = combined_df['Shares'].ffill().fillna(0)
-        pv_series = combined_df['Shares'] * combined_df['Price']
-        cashflows = list(sym_tx[['Date', 'Amount']].itertuples(index=False, name=None))
+        combined_df['Cash'] = combined_df['Cash'].ffill().fillna(0)
+        equity_series = (combined_df['Shares'] * combined_df['Price']) + combined_df['Cash']
+        gross_buy = -pd.to_numeric(
+            sym_tx.loc[pd.to_numeric(sym_tx['Amount'], errors='coerce') < 0, 'Amount'],
+            errors='coerce',
+        ).sum()
+        if pd.isna(gross_buy) or gross_buy <= 0:
+            continue
 
         try:
-            twr = calculate_twr_series(pv_series, cashflows)
-            if twr.empty or (twr == 0).all():
+            perf = (equity_series / float(gross_buy)) * 100.0
+            if perf.empty or perf.dropna().empty:
                 continue
-            non_zero = twr[twr != 0]
+            non_zero = perf[perf != 0]
             if non_zero.empty:
                 continue
             first_date = non_zero.index[0]
-            plot_data = twr.loc[first_date:]
+            plot_data = perf.loc[first_date:]
             current_shares = shares_series.iloc[-1]
+            if abs(current_shares) <= 0.001:
+                last_tx_date = pd.to_datetime(sym_tx['Date']).max()
+                if pd.notna(last_tx_date):
+                    plot_data = plot_data.loc[:pd.Timestamp(last_tx_date)]
+                if plot_data.empty:
+                    continue
             alpha = 1.0 if abs(current_shares) > 0.001 else 0.4
             linestyle = '-' if abs(current_shares) > 0.001 else ':'
             plt_obj.plot(plot_data.index, plot_data, label=f'{sym} ({region})', alpha=alpha, linestyle=linestyle, linewidth=1.5)

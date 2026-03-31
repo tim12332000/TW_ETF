@@ -464,6 +464,42 @@ def main():
     plt.show()
     plt.close()
 
+    # --- 3-5b. Same-Cashflow Drawdown vs QQQ ---
+    qqq_sim = sims.get('QQQ')
+    if qqq_sim is not None:
+        qqq_drawdown = (qqq_sim / qqq_sim.cummax() - 1) * 100
+        my_us_drawdown = (my_us / my_us.cummax() - 1) * 100
+
+        plt.figure(figsize=(11, 6))
+        plt.fill_between(my_us_drawdown.index, my_us_drawdown.values, 0, alpha=0.15, color='blue')
+        plt.plot(my_us_drawdown.index, my_us_drawdown.values, label='My Portfolio', linewidth=2, color='blue')
+        plt.plot(qqq_drawdown.index, qqq_drawdown.values, label='QQQ ??', linewidth=2, alpha=0.85, color='orange')
+        plt.title('Same-Cashflow Drawdown vs. QQQ (USD)')
+        plt.xlabel('??')
+        plt.ylabel('Drawdown (%)')
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig('output/cashflow_drawdown_comparison.png')
+        plt.show()
+        plt.close()
+
+        drawdown_spread = my_us_drawdown - qqq_drawdown.reindex(my_us_drawdown.index).ffill()
+        plt.figure(figsize=(11, 4.5))
+        plt.axhline(0, color='gray', linestyle='--', linewidth=1)
+        plt.fill_between(drawdown_spread.index, drawdown_spread.values, 0, where=(drawdown_spread.values >= 0), alpha=0.2, color='green')
+        plt.fill_between(drawdown_spread.index, drawdown_spread.values, 0, where=(drawdown_spread.values < 0), alpha=0.2, color='red')
+        plt.plot(drawdown_spread.index, drawdown_spread.values, color='black', linewidth=1.8, label='My Drawdown - QQQ Drawdown')
+        plt.title('Drawdown Spread vs. QQQ (Positive = My Portfolio More Resilient)')
+        plt.xlabel('??')
+        plt.ylabel('Spread (%)')
+        plt.legend()
+        plt.grid(True)
+        plt.tight_layout()
+        plt.savefig('output/cashflow_drawdown_spread_vs_qqq.png')
+        plt.show()
+        plt.close()
+
     # --- 3-6. 資產圓餅圖 ---
     combined_df_chart = portfolio_df_combined.dropna(subset=['Price_Total'])
     combined_df_chart = combined_df_chart[combined_df_chart['Price_Total'] > 0]

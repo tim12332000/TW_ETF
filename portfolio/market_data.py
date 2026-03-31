@@ -25,28 +25,10 @@ def get_daily_price(stock_symbol, start_date, end_date, is_tw=True):
         key = f"daily_price_{hashlib.md5(sym_str.encode()).hexdigest()}_{str(start_date)[:10]}_{str(end_date)[:10]}.pkl"
         data = get_cached_data(key, _fetch_daily)
 
-        try:
-            if 'Stock Splits' in data.columns:
-                splits = data['Stock Splits'].fillna(0)
-                close_data = data['Close'].copy()
-
-                def unadjust_series(price_s, split_s):
-                    split_events = split_s[split_s > 0]
-                    for split_date, ratio in split_events.items():
-                        mask = price_s.index < split_date
-                        price_s.loc[mask] *= ratio
-                    return price_s
-
-                if isinstance(data['Close'], pd.DataFrame):
-                    for col in close_data.columns:
-                        if col in splits.columns:
-                            close_data[col] = unadjust_series(close_data[col], splits[col])
-                    return close_data
-                return unadjust_series(close_data, splits)
-        except Exception as e:
-            print(f"[WARN] Price un-adjustment failed: {e}")
-
-        return data['Close']
+        close_data = data['Close']
+        if isinstance(close_data, pd.DataFrame):
+            return close_data.copy()
+        return pd.Series(close_data).copy()
     except Exception as e:
         print(f"?? {stock_symbol} ????: {e}")
         return pd.DataFrame()
@@ -183,7 +165,24 @@ def get_current_price_yf(ticker, is_tw=True, fallback_price=None):
             return price
 
         price = get_cached_data(f"current_price_{ticker}.pkl", _fetch_current)
-        return price if price is not None else fallback_price
+        if price is None:
+            return fallback_price
+
+        try:
+            price = float(price)
+        except Exception:
+            return fallback_price
+
+        # TW live quotes can sometimes arrive on a split-adjusted basis while
+        # the portfolio uses split-normalized history to match ledger shares.
+        if is_tw and fallback_price is not None and pd.notna(fallback_price):
+            fallback_price = float(fallback_price)
+            if fallback_price > 0:
+                ratio = price / fallback_price
+                if ratio < 0.5 or ratio > 1.5:
+                    return fallback_price
+
+        return price
     except Exception as e:
         print(f"?? {ticker} ????: {e}")
         return fallback_price

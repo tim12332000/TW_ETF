@@ -1,6 +1,7 @@
 import numpy as np
 import pandas as pd
 
+from .split_rules import apply_tw_split_events
 
 def process_tw_data(
     *,
@@ -36,6 +37,7 @@ def process_tw_data(
     df_tw.sort_values("Date", inplace=True)
     df_tw["Quantity"] = pd.to_numeric(df_tw["Quantity"], errors="coerce")
     df_tw = df_tw.apply(fix_share_sign, axis=1)
+    df_tw = apply_tw_split_events(df_tw)
     start_date = df_tw["Date"].min()
     end_date = pd.Timestamp.today()
     date_range = pd.date_range(start=start_date, end=end_date, freq="B")
@@ -93,7 +95,8 @@ def process_tw_data(
     for stock, shares in net_holdings_tw.items():
         if shares != 0:
             fallback_price_usd = get_latest_available_price(price_data_tw.get(stock))
-            live_price_twd = get_current_price_yf(stock, is_tw=True)
+            fallback_price_twd = (fallback_price_usd * latest_usd_twd) if fallback_price_usd is not None else None
+            live_price_twd = get_current_price_yf(stock, is_tw=True, fallback_price=fallback_price_twd)
             price = (live_price_twd / latest_usd_twd) if live_price_twd is not None else fallback_price_usd
             if price is not None:
                 portfolio_snapshot_tw += shares * price
@@ -124,7 +127,8 @@ def process_tw_data(
         if count != 0:
             try:
                 fallback_price_usd = get_latest_available_price(price_data_tw.get(stock_code))
-                live_price_twd = get_current_price_yf(stock_code, is_tw=True)
+                fallback_price_twd = (fallback_price_usd * latest_usd_twd) if fallback_price_usd is not None else None
+                live_price_twd = get_current_price_yf(stock_code, is_tw=True, fallback_price=fallback_price_twd)
                 current_price = (live_price_twd / latest_usd_twd) if live_price_twd is not None else fallback_price_usd
             except Exception as e:
                 print(f"Error fetching data for {stock_code}: {e}")
@@ -162,3 +166,4 @@ def process_tw_data(
         "symbols": symbols_tw,
         "usd_twd_series": usd_twd_series,
     }
+
