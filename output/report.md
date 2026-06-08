@@ -67,34 +67,57 @@ Rebalance capital pool (stocks only): 2,940,653 TWD
 |      006208 |      30.0% |       32.1% |                944,052 |               882,196 |  <span style="color: #d93025; font-weight: 600">-61,857</span> |
 Stock performance chart saved to output/stock_performance.png
 
-## Put Protection Analysis
-This is a full-portfolio stress test. Every current non-put holding is shocked by a simple asset-type rule, then current puts are revalued and added back.
-Put: QQQ270115P00350000, Strike $350.0, Exp 2027-01-15 (Underlying: QQQ @ $719.11)
-Put: TSM270115P00200000, Strike $200.0, Exp 2027-01-15 (Underlying: TSM @ $429.71)
-Current non-put assets: $94,186 USD
-Current put market value: $456 USD
-| Put | Underlying | Current Market Value | Put Notional |
+## Proxy Hedge 情境保護率
+QQQ Put 對應美股風險曝險；TSM Put 對應台股風險曝險。保護率用履約價計算：Put payout / 資產池情境損失。
+| Proxy Put | 對應資產池 | 保費成本率 | -30% 保護率 | -50% 保護率 | -90% 保護率 |
+| :--- | :--- | ---: | ---: | ---: | ---: |
+| QQQ Put | 美股風險曝險 | 0.51% | 0.0% | 0.0% | 44.2% |
+| TSM Put | 台股風險曝險 | 1.16% | 0.0% | 0.0% | 24.6% |
+圖表已儲存至 output/proxy_hedge_coverage.png
+
+## Put 避險保護分析
+這是全投組壓力測試：先依資產類型規則衝擊目前所有非 Put 持倉，再重估現有 Put 價值並加回總資產。
+Put：QQQ270115P00350000，履約價 $350.0，到期日 2027-01-15（標的：QQQ @ $718.99）
+Put：TSM270115P00200000，履約價 $200.0，到期日 2027-01-15（標的：TSM @ $428.94）
+目前非 Put 資產：$94,186 USD
+目前 Put 市值：$456 USD
+| Put | 標的 | 目前市值 | Put 名目金額 |
 | :--- | :--- | ---: | ---: |
-| QQQ270115P00350000 | QQQ | $179 | $71,911 |
-| TSM270115P00200000 | TSM | $277 | $42,971 |
-| Holding | Current Value | Stress Rule |
+| QQQ270115P00350000 | QQQ | $179 | $71,899 |
+| TSM270115P00200000 | TSM | $277 | $42,894 |
+| 持倉 | 目前市值 | 壓力測試規則 |
 | :--- | ---: | :--- |
-| 006208 | $29,957 | Broad equity exposure |
-| QLD | $25,600 | 2x equity exposure |
-| 00631L | $20,022 | 2x equity exposure |
-| SPYM | $17,734 | Broad equity exposure |
-| TSLA | $405 | High beta equity 1.5x |
-| UNH | $404 | Defensive equity 0.8x |
-| EDV | $63 | Long Treasury +5% in bear market |
-| Scenario | Base Drop | Total Assets (Unhedged) | Total Assets (Hedged) | Total Puts Value | Protection |
+| 006208 | $29,957 | 一般股票曝險 |
+| QLD | $25,600 | 2 倍股票曝險 |
+| 00631L | $20,022 | 2 倍股票曝險 |
+| SPYM | $17,734 | 一般股票曝險 |
+| TSLA | $405 | 高 Beta 股票 1.5 倍 |
+| UNH | $404 | 防禦型股票 0.8 倍 |
+| EDV | $63 | 長天期美債在熊市情境 +5% |
+| 情境 | 基準漲跌幅 | 總資產（未避險） | 總資產（含 Put） | Put 總價值 | 保護效果 |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| Current | 0% | $94,186 | **$94,642** | $456 | <span style="color: #188038; font-weight: 600">+$456</span> |
-| Correction | -10% | $80,199 | **$80,205** | $6 | <span style="color: #188038; font-weight: 600">+$6</span> |
-| Bear Market | -20% | $66,216 | **$66,413** | $198 | <span style="color: #188038; font-weight: 600">+$198</span> |
-| Crash | -30% | $52,235 | **$53,502** | $1,267 | <span style="color: #188038; font-weight: 600">+$1,267</span> |
-| Crisis | -40% | $38,249 | **$42,162** | $3,913 | <span style="color: #188038; font-weight: 600">+$3,913</span> |
-| Collapse | -50% | $24,718 | **$33,087** | $8,368 | <span style="color: #188038; font-weight: 600">+$8,368</span> |
-Chart saved to output/total_asset_protection.png
+| 翻倍上漲 | 100% | $234,051 | **$234,051** | $0 | $0 |
+| 大幅上漲 | 90% | $220,065 | **$220,065** | $0 | $0 |
+| 強勢上漲 | 80% | $206,078 | **$206,078** | $0 | $0 |
+| 明顯上漲 | 70% | $192,092 | **$192,092** | $0 | $0 |
+| 延續上漲 | 60% | $178,105 | **$178,105** | $0 | $0 |
+| 大漲 | 50% | $164,119 | **$164,119** | $0 | <span style="color: #188038; font-weight: 600">+$0</span> |
+| 強漲 | 40% | $150,132 | **$150,132** | $0 | <span style="color: #188038; font-weight: 600">+$0</span> |
+| 上漲 | 30% | $136,145 | **$136,145** | $0 | <span style="color: #188038; font-weight: 600">+$0</span> |
+| 溫和上漲 | 20% | $122,159 | **$122,159** | $0 | <span style="color: #188038; font-weight: 600">+$0</span> |
+| 小漲 | 10% | $108,172 | **$108,172** | $0 | <span style="color: #188038; font-weight: 600">+$0</span> |
+| 目前 | 0% | $94,186 | **$94,642** | $456 | <span style="color: #188038; font-weight: 600">+$456</span> |
+| 修正 | -10% | $80,199 | **$80,205** | $6 | <span style="color: #188038; font-weight: 600">+$6</span> |
+| 熊市 | -20% | $66,216 | **$66,414** | $199 | <span style="color: #188038; font-weight: 600">+$199</span> |
+| 崩跌 | -30% | $52,235 | **$53,507** | $1,271 | <span style="color: #188038; font-weight: 600">+$1,271</span> |
+| 危機 | -40% | $38,249 | **$42,172** | $3,924 | <span style="color: #188038; font-weight: 600">+$3,924</span> |
+| 重挫 | -50% | $24,718 | **$33,102** | $8,383 | <span style="color: #188038; font-weight: 600">+$8,383</span> |
+| 深度重挫 | -60% | $19,856 | **$34,426** | $14,570 | <span style="color: #188038; font-weight: 600">+$14,570</span> |
+| 極端崩跌 | -70% | $15,018 | **$37,357** | $22,338 | <span style="color: #188038; font-weight: 600">+$22,338</span> |
+| 系統性危機 | -80% | $10,217 | **$41,794** | $31,577 | <span style="color: #188038; font-weight: 600">+$31,577</span> |
+| 近乎歸零 | -90% | $5,415 | **$47,563** | $42,147 | <span style="color: #188038; font-weight: 600">+$42,147</span> |
+| 歸零壓力 | -100% | $614 | **$54,149** | $53,535 | <span style="color: #188038; font-weight: 600">+$53,535</span> |
+圖表已儲存至 output/total_asset_protection.png
 
 ## Charts
 
@@ -134,10 +157,13 @@ Chart saved to output/total_asset_protection.png
 ### Stock Performance
 ![Stock Performance](stock_performance.png)
 
-### Put Protection Full Portfolio Stress
-![Put Protection Full Portfolio Stress](total_asset_protection.png)
+### Proxy Hedge 情境保護率
+![Proxy Hedge 情境保護率](proxy_hedge_coverage.png)
+
+### Put 避險保護全投組壓力測試
+![Put 避險保護全投組壓力測試](total_asset_protection.png)
 
 ## Execution Summary
-- Cache Loads: 54
+- Cache Loads: 20
 - Cache Misses (Network Fetches): 0
 - Price Calibrations Applied: 8

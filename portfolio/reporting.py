@@ -224,25 +224,25 @@ def analyze_put_protection(portfolio_df):
         symbol = str(symbol).upper()
         if symbol in {'EDV', 'TLT', 'ZROZ'}:
             if drop <= -0.30:
-                return 0.15, 'Long Treasury +15% in crash'
+                return 0.15, '長天期美債在崩跌情境 +15%'
             if drop <= -0.20:
-                return 0.05, 'Long Treasury +5% in bear market'
-            return 0.0, 'Long Treasury unchanged'
+                return 0.05, '長天期美債在熊市情境 +5%'
+            return 0.0, '長天期美債不變'
         if symbol in {'TMF', 'UBT'}:
             if drop <= -0.30:
-                return 0.30, 'Levered Treasury +30% in crash'
+                return 0.30, '槓桿美債在崩跌情境 +30%'
             if drop <= -0.20:
-                return 0.10, 'Levered Treasury +10% in bear market'
-            return 0.0, 'Levered Treasury unchanged'
+                return 0.10, '槓桿美債在熊市情境 +10%'
+            return 0.0, '槓桿美債不變'
         if symbol in {'QLD', '00631L'}:
-            return max(drop * 2.0, -0.99), '2x equity exposure'
+            return max(drop * 2.0, -0.99), '2 倍股票曝險'
         if symbol == 'TQQQ':
-            return max(drop * 3.0, -0.99), '3x equity exposure'
+            return max(drop * 3.0, -0.99), '3 倍股票曝險'
         if symbol in {'TSLA'}:
-            return max(drop * 1.5, -0.99), 'High beta equity 1.5x'
+            return max(drop * 1.5, -0.99), '高 Beta 股票 1.5 倍'
         if symbol in {'UNH'}:
-            return drop * 0.8, 'Defensive equity 0.8x'
-        return drop, 'Broad equity exposure'
+            return drop * 0.8, '防禦型股票 0.8 倍'
+        return drop, '一般股票曝險'
 
     for put_info in puts_info:
         put_info['notional'] = put_info['s0'] * 100 * put_info['contracts']
@@ -252,35 +252,50 @@ def analyze_put_protection(portfolio_df):
     base_non_put_value = sum(pos['value'] for pos in non_put_positions)
     current_put_market_value = sum(put_info['market_value'] for put_info in puts_info)
     scenarios = [
-        {'drop': 0.0, 'desc': 'Current'},
-        {'drop': -0.10, 'desc': 'Correction'},
-        {'drop': -0.20, 'desc': 'Bear Market'},
-        {'drop': -0.30, 'desc': 'Crash'},
-        {'drop': -0.40, 'desc': 'Crisis'},
-        {'drop': -0.50, 'desc': 'Collapse'},
+        {'drop': 1.00, 'desc': '翻倍上漲'},
+        {'drop': 0.90, 'desc': '大幅上漲'},
+        {'drop': 0.80, 'desc': '強勢上漲'},
+        {'drop': 0.70, 'desc': '明顯上漲'},
+        {'drop': 0.60, 'desc': '延續上漲'},
+        {'drop': 0.50, 'desc': '大漲'},
+        {'drop': 0.40, 'desc': '強漲'},
+        {'drop': 0.30, 'desc': '上漲'},
+        {'drop': 0.20, 'desc': '溫和上漲'},
+        {'drop': 0.10, 'desc': '小漲'},
+        {'drop': 0.0, 'desc': '目前'},
+        {'drop': -0.10, 'desc': '修正'},
+        {'drop': -0.20, 'desc': '熊市'},
+        {'drop': -0.30, 'desc': '崩跌'},
+        {'drop': -0.40, 'desc': '危機'},
+        {'drop': -0.50, 'desc': '重挫'},
+        {'drop': -0.60, 'desc': '深度重挫'},
+        {'drop': -0.70, 'desc': '極端崩跌'},
+        {'drop': -0.80, 'desc': '系統性危機'},
+        {'drop': -0.90, 'desc': '近乎歸零'},
+        {'drop': -1.00, 'desc': '歸零壓力'},
     ]
 
-    print('\n## Put Protection Analysis')
-    print('This is a full-portfolio stress test. Every current non-put holding is shocked by a simple asset-type rule, then current puts are revalued and added back.')
+    print('\n## Put 避險保護分析')
+    print('這是全投組壓力測試：先依資產類型規則衝擊目前所有非 Put 持倉，再重估現有 Put 價值並加回總資產。')
     for put_info in puts_info:
-        print(f"Put: {put_info['sym']}, Strike ${put_info['strike']}, Exp {put_info['expiry'].strftime('%Y-%m-%d')} (Underlying: {put_info['underlying']} @ ${put_info['s0']:.2f})")
-    print(f'Current non-put assets: ${base_non_put_value:,.0f} USD')
-    print(f'Current put market value: ${current_put_market_value:,.0f} USD')
-    print('| Put | Underlying | Current Market Value | Put Notional |')
+        print(f"Put：{put_info['sym']}，履約價 ${put_info['strike']}，到期日 {put_info['expiry'].strftime('%Y-%m-%d')}（標的：{put_info['underlying']} @ ${put_info['s0']:.2f}）")
+    print(f'目前非 Put 資產：${base_non_put_value:,.0f} USD')
+    print(f'目前 Put 市值：${current_put_market_value:,.0f} USD')
+    print('| Put | 標的 | 目前市值 | Put 名目金額 |')
     print('| :--- | :--- | ---: | ---: |')
     for put_info in puts_info:
         print(f"| {put_info['sym']} | {put_info['underlying']} | ${put_info['market_value']:,.0f} | ${put_info['notional']:,.0f} |")
 
-    print('| Holding | Current Value | Stress Rule |')
+    print('| 持倉 | 目前市值 | 壓力測試規則 |')
     print('| :--- | ---: | :--- |')
     for pos in sorted(non_put_positions, key=lambda item: item['value'], reverse=True):
         _, rule = stress_assumption(pos['sym'], -0.20)
         print(f"| {pos['sym']} | ${pos['value']:,.0f} | {rule} |")
 
-    print('| Scenario | Base Drop | Total Assets (Unhedged) | Total Assets (Hedged) | Total Puts Value | Protection |')
+    print('| 情境 | 基準漲跌幅 | 總資產（未避險） | 總資產（含 Put） | Put 總價值 | 保護效果 |')
     print('| :--- | :--- | :--- | :--- | :--- | :--- |')
 
-    drops = np.linspace(0, -1.00, 100)
+    drops = np.linspace(1.00, -1.00, 200)
     wealth_no_hedge = []
     wealth_with_hedge = []
 
@@ -297,7 +312,7 @@ def analyze_put_protection(portfolio_df):
                 days_to_exp = (put_info['expiry'] - today).days
                 T = days_to_exp / 365.0
                 new_u = put_info['s0'] * (1 + drop)
-                vol = 0.20 + abs(drop) * 0.8
+                vol = 0.20 + max(-drop, 0) * 0.8
                 put_val_share = black_scholes_put(new_u, put_info['strike'], T, r, vol)
                 total_put_val += put_val_share * 100 * put_info['contracts']
         new_total_with_put = new_total_no_put + total_put_val
@@ -317,25 +332,25 @@ def analyze_put_protection(portfolio_df):
                 days_to_exp = (put_info['expiry'] - today).days
                 T = days_to_exp / 365.0
                 new_u = put_info['s0'] * (1 + drop)
-                vol = 0.20 + abs(drop) * 0.8
+                vol = 0.20 + max(-drop, 0) * 0.8
                 pv_share = black_scholes_put(new_u, put_info['strike'], T, r, vol)
                 total_pv += pv_share * 100 * put_info['contracts']
         wealth_no_hedge.append(val_no)
         wealth_with_hedge.append(val_no + total_pv)
 
     fig, ax1 = plt.subplots(figsize=(10, 6))
-    ax1.plot(drops * 100, wealth_no_hedge, label='Full Portfolio Stress (No Puts)', color='red', linewidth=2)
-    ax1.plot(drops * 100, wealth_with_hedge, label='Full Portfolio Stress (With Puts)', color='blue', linewidth=2)
-    ax1.fill_between(drops * 100, wealth_no_hedge, wealth_with_hedge, color='green', alpha=0.1, label='Protection')
-    ax1.set_title('Put Protection Full Portfolio Stress')
-    ax1.set_xlabel('Base Equity Drop (%)')
-    ax1.set_ylabel('Total Asset Value (USD)')
+    ax1.plot(drops * 100, wealth_no_hedge, label='全投組壓力測試（不含 Put）', color='red', linewidth=2)
+    ax1.plot(drops * 100, wealth_with_hedge, label='全投組壓力測試（含 Put）', color='blue', linewidth=2)
+    ax1.fill_between(drops * 100, wealth_no_hedge, wealth_with_hedge, color='green', alpha=0.1, label='保護效果')
+    ax1.set_title('Put 避險保護全投組壓力測試')
+    ax1.set_xlabel('基準股票漲跌幅 (%)')
+    ax1.set_ylabel('總資產價值 (USD)')
     ax1.grid(True, alpha=0.3)
 
     payouts = np.array(wealth_with_hedge) - np.array(wealth_no_hedge)
     ax2 = ax1.twinx()
-    ax2.plot(drops * 100, payouts, label='Puts Payout Value', color='purple', linestyle='--', linewidth=2)
-    ax2.set_ylabel('Puts Value (USD)', color='purple')
+    ax2.plot(drops * 100, payouts, label='Put 保護價值', color='purple', linestyle='--', linewidth=2)
+    ax2.set_ylabel('Put 價值 (USD)', color='purple')
     ax2.tick_params(axis='y', labelcolor='purple')
 
     lines_1, labels_1 = ax1.get_legend_handles_labels()
@@ -346,7 +361,7 @@ def analyze_put_protection(portfolio_df):
         idx = next(x for x, val in enumerate(payouts) if val > 1000)
         start_drop = drops[idx] * 100
         ax1.axvline(x=start_drop, color='orange', linestyle=':')
-        ax1.text(start_drop - 2, min(wealth_no_hedge) + 5000, f'Starts ~{abs(start_drop):.0f}%', rotation=90, color='orange')
+        ax1.text(start_drop - 2, min(wealth_no_hedge) + 5000, f'約 {abs(start_drop):.0f}% 開始', rotation=90, color='orange')
     except Exception:
         pass
 
@@ -354,4 +369,4 @@ def analyze_put_protection(portfolio_df):
     plt.savefig('output/total_asset_protection.png')
     plt.show()
     plt.close()
-    print('Chart saved to output/total_asset_protection.png')
+    print('圖表已儲存至 output/total_asset_protection.png')
