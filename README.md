@@ -33,6 +33,7 @@ A local portfolio analysis project for combined TW and US holdings.
 ## Outputs
 
 Generated files are written to `output/`.
+The main text report is written to `output/report.md`.
 Cached market data is written to `cache/`.
 
 ## Current Design Goal

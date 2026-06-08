@@ -7,9 +7,10 @@ TW_STOCK_SPLITS = {
     "0050": [
         {"effective_date": "2025-06-18", "ratio": 4.0},
     ],
-    # 00631L: 1 -> 22 split. Price basis in current data switches on 2026-03-23.
+    # 00631L: 1 -> 22 split. Last pre-split trading day was 2026-03-24;
+    # units were split during the 2026-03-25 to 2026-03-30 halt.
     "00631L": [
-        {"effective_date": "2026-03-23", "ratio": 22.0},
+        {"effective_date": "2026-03-25", "ratio": 22.0},
     ],
 }
 
@@ -82,3 +83,21 @@ def apply_tw_split_events(df):
     result["Date"] = pd.to_datetime(result["Date"])
     result = result.sort_values(["Date", "Symbol"]).reset_index(drop=True)
     return result
+
+
+def tw_split_price_factors(symbol, date_index):
+    """
+    Return per-date multipliers that restore split-adjusted Yahoo closes to
+    the transaction ledger's share basis before each synthetic split event.
+    """
+    base_symbol = str(symbol).split(".")[0]
+    factors = pd.Series(1.0, index=pd.DatetimeIndex(pd.to_datetime(date_index)))
+
+    for event in sorted(TW_STOCK_SPLITS.get(base_symbol, []), key=lambda x: pd.Timestamp(x["effective_date"])):
+        ratio = float(event["ratio"])
+        if ratio <= 0:
+            continue
+        effective_date = pd.Timestamp(event["effective_date"])
+        factors.loc[factors.index < effective_date] *= ratio
+
+    return factors

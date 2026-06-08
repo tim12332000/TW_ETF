@@ -12,26 +12,19 @@ import portfolio.app as portfolio_app
 from datetime import datetime, timedelta
 
 class TestQLDSplitLogic(unittest.TestCase):
-    def test_price_unadjustment(self):
+    def test_price_series_stays_split_adjusted(self):
         """
-        Verify that QLD prices before the split date (2025-11-20) are un-adjusted 
-        (restored to pre-split raw prices) to match the unadjusted holdings in CSV.
+        Verify that QLD prices stay on Yahoo's split-adjusted basis.
+        US transaction quantities are normalized to that same basis, so prices
+        should not be manually restored to pre-split raw closes here.
         """
-        print("\n[Test] Checking QLD price un-adjustment logic...")
+        print("\n[Test] Checking QLD split-adjusted price logic...")
         start_date = "2025-11-15"
         end_date = "2025-11-25"
         
-        # This function calls yfinance and applies our new un-adjustment logic
         prices = portfolio_app.get_daily_price("QLD", start_date, end_date, is_tw=False)
-        
-        # 2025-11-19 was the last day before split. 
-        # 2025-11-20 was the split date (2-for-1).
-        # Raw close on 19th should be around 135. Adjusted close is ~67.5.
-        # We expect our logic to return ~135.
-        
+
         try:
-            # Locate dates
-            # Safe extraction of scalar value
             def to_scalar(obj):
                 if isinstance(obj, (pd.Series, pd.DataFrame)):
                     if obj.size > 0:
@@ -43,19 +36,15 @@ class TestQLDSplitLogic(unittest.TestCase):
             price_pre = to_scalar(prices.loc["2025-11-19"])
             price_post = to_scalar(prices.loc["2025-11-20"])
             
-            print(f"Price on 2025-11-19 (Pre-Split): {price_pre:.2f}")
-            print(f"Price on 2025-11-20 (Post-Split): {price_post:.2f}")
-            
-            # Assert Pre-Split price is 'high' (around 130-140)
-            self.assertGreater(price_pre, 100, "Price on 2025-11-19 should be un-adjusted (approx > 100), but got lower value.")
-            
-            # Assert Post-Split price is 'low' (around 60-70)
-            self.assertLess(price_post, 80, "Price on 2025-11-20 should be post-split (approx < 80).")
-            
-            # The drop should be roughly 50%
+            print(f"Price on 2025-11-19 (Adjusted Pre-Split): {price_pre:.2f}")
+            print(f"Price on 2025-11-20 (Adjusted Post-Split): {price_post:.2f}")
+
+            self.assertLess(price_pre, 100, "Price on 2025-11-19 should remain split-adjusted, not raw pre-split.")
+            self.assertLess(price_post, 100, "Price on 2025-11-20 should remain split-adjusted.")
+
             ratio = price_post / price_pre
-            print(f"Split Ratio observed: {ratio:.2f}")
-            self.assertTrue(0.4 < ratio < 0.6, "Prices should drop by roughly half on split date.")
+            print(f"Adjusted price ratio observed: {ratio:.2f}")
+            self.assertTrue(0.8 < ratio < 1.2, "Adjusted prices should stay roughly continuous across the split date.")
             
         except KeyError as e:
             self.fail(f"Date not found in price data: {e}")

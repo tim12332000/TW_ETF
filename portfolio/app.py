@@ -43,6 +43,22 @@ from tabulate import tabulate
 # Global Counters for logging
 CALIBRATIONS = 0
 
+REPORT_CHARTS = [
+    ('Asset Trend', 'asset_trend.png'),
+    ('Daily Asset Allocation', 'asset_allocation_monthly.png'),
+    ('Funding Ratio', 'funding_ratio.png'),
+    ('Portfolio TWR', 'twr_chart.png'),
+    ('Cumulative Return Comparison', 'cumulative_return_comparison.png'),
+    ('Portfolio vs Benchmark USD', 'portfolio_vs_benchmark_usd.png'),
+    ('Drawdown Underwater', 'drawdown_underwater.png'),
+    ('Cashflow Drawdown Comparison', 'cashflow_drawdown_comparison.png'),
+    ('Cashflow Drawdown Spread vs QQQ', 'cashflow_drawdown_spread_vs_qqq.png'),
+    ('Asset Pie Chart', 'asset_pie_chart.png'),
+    ('Monthly Investment', 'monthly_investment.png'),
+    ('Stock Performance', 'stock_performance.png'),
+    ('Put Protection Full Portfolio Stress', 'total_asset_protection.png'),
+]
+
 # =============================================================================
 # 全域設定：設定中文字型與正確顯示負號
 # =============================================================================
@@ -58,6 +74,109 @@ if not os.path.exists('output'):
 def _record_calibrations(count):
     global CALIBRATIONS
     CALIBRATIONS += count
+
+
+def print_chart_gallery():
+    print("\n## Charts")
+    printed = False
+    for title, filename in REPORT_CHARTS:
+        chart_path = os.path.join('output', filename)
+        if os.path.exists(chart_path):
+            print(f"\n### {title}")
+            print(f"![{title}]({filename})")
+            printed = True
+    if not printed:
+        print("No charts were generated.")
+
+
+def print_metric_list(title, rows):
+    print(f"\n## {title}\n")
+    for label, value in rows:
+        print(f"- **{label}**：{value}")
+
+
+def color_signed(value, text):
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return text
+    if pd.isna(numeric) or numeric == 0:
+        return text
+    color = "#188038" if numeric > 0 else "#d93025"
+    return f'<span style="color: {color}; font-weight: 600">{text}</span>'
+
+
+def format_number(value, suffix="", decimals=2, color=False, force_sign=False):
+    if pd.isna(value):
+        return ""
+    sign = "+" if force_sign and value > 0 else ""
+    text = f"{sign}{value:,.{decimals}f}{suffix}"
+    return color_signed(value, text) if color else text
+
+
+def build_symbol_value_history(result, date_index, price_data, fx_series=None):
+    df = result['df'].copy()
+    df['Date'] = pd.to_datetime(df['Date']).dt.normalize()
+    holdings = df.pivot_table(index='Date', columns='Symbol', values='Quantity', aggfunc='sum')
+    holdings = holdings.reindex(date_index, fill_value=0).fillna(0).cumsum()
+    prices = price_data.reindex(date_index).ffill().bfill()
+    values = holdings.reindex(columns=prices.columns, fill_value=0) * prices
+    if fx_series is not None:
+        values = values.mul(align_fx_series(values.index, fx_series), axis=0)
+    return values.clip(lower=0)
+
+
+def plot_monthly_asset_allocation(tw_result, us_result, date_index, usd_twd_series):
+    tw_values = build_symbol_value_history(
+        tw_result,
+        date_index,
+        tw_result.get('price_data_twd', tw_result['price_data']),
+    )
+    us_values = build_symbol_value_history(
+        us_result,
+        date_index,
+        us_result['price_data'],
+        fx_series=usd_twd_series,
+    )
+    values = pd.concat([tw_values, us_values], axis=1).fillna(0)
+    values = values.loc[:, values.max() > 0]
+    if values.empty:
+        return
+
+    daily_values = values.loc[values.sum(axis=1) > 0]
+    if daily_values.empty:
+        return
+
+    daily_alloc = daily_values.div(daily_values.sum(axis=1), axis=0) * 100
+    max_alloc = daily_alloc.max().sort_values(ascending=False)
+    major_symbols = max_alloc[max_alloc >= 1.0].index.tolist()
+    if len(major_symbols) > 12:
+        major_symbols = max_alloc.head(12).index.tolist()
+    daily_alloc = daily_alloc[major_symbols].copy()
+    other = 100 - daily_alloc.sum(axis=1)
+    if (other > 0.5).any():
+        daily_alloc['Other'] = other.clip(lower=0)
+
+    fig, ax = plt.subplots(figsize=(14, 7))
+    colors = plt.get_cmap('tab20').colors
+    ax.stackplot(
+        daily_alloc.index,
+        [daily_alloc[col].values for col in daily_alloc.columns],
+        labels=daily_alloc.columns,
+        colors=colors[:len(daily_alloc.columns)],
+        alpha=0.9,
+    )
+    ax.set_title('Daily Asset Allocation')
+    ax.set_xlabel('Date')
+    ax.set_ylabel('Allocation (%)')
+    ax.set_ylim(0, 100)
+    ax.legend(bbox_to_anchor=(1.02, 1), loc='upper left', fontsize='small')
+    ax.tick_params(axis='x', rotation=45)
+    ax.grid(True, axis='y', alpha=0.25)
+    plt.tight_layout()
+    plt.savefig('output/asset_allocation_monthly.png')
+    plt.show()
+    plt.close()
 
 
 def process_tw_data():
@@ -101,7 +220,7 @@ def main():
 
     # --- 1-1. Logger 初始化 ---
     original_stdout = sys.stdout
-    sys.stdout = DualLogger('output/report.txt')
+    sys.stdout = DualLogger('output/report.md')
 
     # --- 1-2. 匯率 + TW/US 原始資料 ---
     tw_result = process_tw_data()
@@ -182,11 +301,39 @@ def main():
     # --- 1-7. 個股明細表處理 ---
     portfolio_df_combined = pd.concat([tw_result['portfolio_df'], us_result['portfolio_df']], ignore_index=True)
     portfolio_df_combined = portfolio_df_combined.fillna(0)
-    portfolio_df_combined.rename(columns={'Total PnL': 'Total PnL(USD)'}, inplace=True)
-    portfolio_df_combined['Total PnL(TWD)'] = portfolio_df_combined['Total PnL(USD)'] * latest_usd_twd
-    portfolio_df_combined['Total PnL(USD)'] = portfolio_df_combined['Total PnL(USD)'].apply(lambda x: f"{float(x):,.2f}")
-    portfolio_df_combined['Total PnL(TWD)'] = portfolio_df_combined['Total PnL(TWD)'].apply(lambda x: f"{float(x):,.2f}")
-    portfolio_df_combined['Total PnL(%)'] = portfolio_df_combined['Total PnL(%)'].apply(lambda x: f"{float(x):,.2f}%")
+    portfolio_df_combined.rename(columns={
+        'Price PnL': 'Price PnL(USD)',
+        'Dividend': 'Dividend(USD)',
+        'Total PnL': 'Total PnL(USD)',
+    }, inplace=True)
+    portfolio_df_combined['Price PnL(TWD)'] = portfolio_df_combined['Price PnL(USD)'] * latest_usd_twd
+    portfolio_df_combined['Dividend(TWD)'] = np.where(
+        portfolio_df_combined.get('Dividend_TWD', 0) != 0,
+        portfolio_df_combined.get('Dividend_TWD', 0),
+        portfolio_df_combined['Dividend(USD)'] * latest_usd_twd,
+    )
+    portfolio_df_combined['Total PnL(TWD)'] = portfolio_df_combined['Price PnL(TWD)'] + portfolio_df_combined['Dividend(TWD)']
+    portfolio_df_combined['Price PnL(USD)'] = portfolio_df_combined['Price PnL(USD)'].apply(
+        lambda x: format_number(float(x), color=True)
+    )
+    portfolio_df_combined['Price PnL(TWD)'] = portfolio_df_combined['Price PnL(TWD)'].apply(
+        lambda x: format_number(float(x), color=True)
+    )
+    portfolio_df_combined['Dividend(USD)'] = portfolio_df_combined['Dividend(USD)'].apply(
+        lambda x: format_number(float(x), color=True)
+    )
+    portfolio_df_combined['Dividend(TWD)'] = portfolio_df_combined['Dividend(TWD)'].apply(
+        lambda x: format_number(float(x), color=True)
+    )
+    portfolio_df_combined['Total PnL(USD)'] = portfolio_df_combined['Total PnL(USD)'].apply(
+        lambda x: format_number(float(x), color=True)
+    )
+    portfolio_df_combined['Total PnL(TWD)'] = portfolio_df_combined['Total PnL(TWD)'].apply(
+        lambda x: format_number(float(x), color=True)
+    )
+    portfolio_df_combined['Total PnL(%)'] = portfolio_df_combined['Total PnL(%)'].apply(
+        lambda x: format_number(float(x), suffix="%", color=True)
+    )
 
     # 計算平均成本 (每股成本)
     portfolio_df_combined['AvgCost'] = portfolio_df_combined.apply(
@@ -212,7 +359,11 @@ def main():
     )
 
     portfolio_df_combined = portfolio_df_combined[
-        ['Symbol', 'Name', 'Quantity_now', 'Price', 'AvgCost', 'Price_Total', 'Cost', 'Total PnL(USD)', 'Total PnL(TWD)', 'Total PnL(%)', 'Alloc(%)']
+        [
+            'Symbol', 'Name', 'Quantity_now', 'Price', 'AvgCost', 'Price_Total', 'Cost',
+            'Price PnL(USD)', 'Price PnL(TWD)', 'Dividend(USD)', 'Dividend(TWD)',
+            'Total PnL(USD)', 'Total PnL(TWD)', 'Total PnL(%)', 'Alloc(%)'
+        ]
     ]
 
     # --- 1-8. Benchmark 模擬 ---
@@ -328,53 +479,78 @@ def main():
         'Profit %', 'XIRR %', 'AnnVol %', 'MaxDD %', 'Sharpe'
     ]
     bench_df = pd.DataFrame(benchmark_rows, columns=bench_headers)
+    bench_display_df = bench_df.copy()
+    bench_display_df['Final Value (TWD)'] = bench_display_df['Final Value (TWD)'].apply(
+        lambda x: format_number(x)
+    )
+    bench_display_df['Profit (TWD)'] = bench_display_df['Profit (TWD)'].apply(
+        lambda x: format_number(x, color=True)
+    )
+    bench_display_df['Profit %'] = bench_display_df['Profit %'].apply(
+        lambda x: format_number(x, suffix="%", color=True)
+    )
+    bench_display_df['XIRR %'] = bench_display_df['XIRR %'].apply(
+        lambda x: format_number(x, suffix="%", color=True)
+    )
+    bench_display_df['AnnVol %'] = bench_display_df['AnnVol %'].apply(
+        lambda x: format_number(x, suffix="%")
+    )
+    bench_display_df['MaxDD %'] = bench_display_df['MaxDD %'].apply(
+        lambda x: format_number(x, suffix="%")
+    )
+    bench_display_df['Sharpe'] = bench_display_df['Sharpe'].apply(
+        lambda x: format_number(x)
+    )
 
     # =================================================================
     # Phase 2: 文字報告（一次性全部印出）
     # =================================================================
 
     # --- 2-1. 綜合資產報告 (USD) ---
-    print("\n=== 綜合資產配置報告 (單位: USD) ===")
-    print(f"累積外部投入金額：{total_investment_us:,.2f} USD")
-    print(f"實際淨投入資金：{invested_capital_us:,.2f} USD")
-    print(f"最終組合市值：{final_portfolio_value_us:,.2f} USD")
-    print(f"總獲利：{total_profit_us:,.2f} USD")
-    print(f"總獲利百分比：{total_profit_pct_us:.2f}%")
-    print(f"AnnVol：{ann_vol_main:.2f}%")
-    print(f"MaxDD：{max_dd_main:.2f}%")
-    print(f"Sharpe：{sharpe_main:.2f}")
-    print(f"Sortino Ratio：{sortino_ratio:.2f}")
-    print(f"Calmar Ratio：{calmar_ratio:.2f}")
+    usd_metrics = [
+        ("累積外部投入金額", f"{total_investment_us:,.2f} USD"),
+        ("實際淨投入資金", f"{invested_capital_us:,.2f} USD"),
+        ("最終組合市值", f"{final_portfolio_value_us:,.2f} USD"),
+        ("總獲利", format_number(total_profit_us, suffix=" USD", color=True)),
+        ("總獲利百分比", format_number(total_profit_pct_us, suffix="%", color=True)),
+        ("AnnVol", f"{ann_vol_main:.2f}%"),
+        ("MaxDD", f"{max_dd_main:.2f}%"),
+        ("Sharpe", f"{sharpe_main:.2f}"),
+        ("Sortino Ratio", f"{sortino_ratio:.2f}"),
+        ("Calmar Ratio", f"{calmar_ratio:.2f}"),
+    ]
     if combined_irr is not None:
-        print(f"綜合 XIRR: {combined_irr:.2%}")
+        usd_metrics.append(("綜合 XIRR", color_signed(combined_irr, f"{combined_irr:.2%}")))
+    print_metric_list("綜合資產配置報告 (單位: USD)", usd_metrics)
 
     # --- 2-2. 綜合資產報告 (TWD) ---
-    print("\n=== 綜合資產配置報告 (單位: TWD) ===")
-    print(f"累積外部投入金額：{total_investment_twd:,.2f} TWD")
-    print(f"實際淨投入資金：{invested_capital_twd:,.2f} TWD")
-    print(f"最終組合市值：{final_portfolio_value_twd:,.2f} TWD")
-    print(f"總獲利：{total_profit_twd:,.2f} TWD")
-    print(f"總獲利百分比：{total_profit_pct_twd:.2f}%")
-    print(f"AnnVol：{ann_vol_main_twd:.2f}%")
-    print(f"MaxDD：{max_dd_main_twd:.2f}%")
-    print(f"Sharpe：{sharpe_main_twd:.2f}")
-    print(f"Sortino Ratio：{sortino_ratio_twd:.2f}")
-    print(f"Calmar Ratio：{calmar_ratio_twd:.2f}")
+    twd_metrics = [
+        ("累積外部投入金額", f"{total_investment_twd:,.2f} TWD"),
+        ("實際淨投入資金", f"{invested_capital_twd:,.2f} TWD"),
+        ("最終組合市值", f"{final_portfolio_value_twd:,.2f} TWD"),
+        ("總獲利", format_number(total_profit_twd, suffix=" TWD", color=True)),
+        ("總獲利百分比", format_number(total_profit_pct_twd, suffix="%", color=True)),
+        ("AnnVol", f"{ann_vol_main_twd:.2f}%"),
+        ("MaxDD", f"{max_dd_main_twd:.2f}%"),
+        ("Sharpe", f"{sharpe_main_twd:.2f}"),
+        ("Sortino Ratio", f"{sortino_ratio_twd:.2f}"),
+        ("Calmar Ratio", f"{calmar_ratio_twd:.2f}"),
+    ]
     if combined_irr_twd is not None:
-        print(f"綜合 XIRR: {combined_irr_twd:.2%}")
+        twd_metrics.append(("綜合 XIRR", color_signed(combined_irr_twd, f"{combined_irr_twd:.2%}")))
+    print_metric_list("綜合資產配置報告 (單位: TWD)", twd_metrics)
 
     # --- 2-3. 個股明細表 ---
-    print("\n=== 綜合投資組合股票明細 (TWD) ===")
-    print(tabulate(portfolio_df_combined, headers='keys', tablefmt='psql', showindex=False))
+    print("\n## 綜合投資組合股票明細 (TWD)")
+    print(tabulate(portfolio_df_combined, headers='keys', tablefmt='github', showindex=False))
 
     # --- 2-4. 投組 vs Benchmark 總表 ---
-    print("\n=== 投組 vs. Benchmark 總表 (TWD) ===")
+    print("\n## 投組 vs. Benchmark 總表 (TWD)")
     print(tabulate(
-        bench_df,
+        bench_display_df,
         headers='keys',
-        tablefmt='psql',
-        showindex=False,
-        floatfmt='.2f'
+        tablefmt='github',
+        showindex=False
     ))
 
     # --- 2-5. 目標配置與再平衡建議 ---
@@ -397,6 +573,9 @@ def main():
     plt.savefig('output/asset_trend.png')
     plt.show()
     plt.close()
+
+    # --- 3-1b. Monthly asset allocation ---
+    plot_monthly_asset_allocation(tw_result, us_result, date_index, usd_twd_series)
 
     # --- 3-2. Funding Ratio ---
     _den = daily_invested_capital_twd.replace(0, np.nan)
@@ -541,17 +720,16 @@ def main():
 
     # --- 3-9. Put 保護力分析 ---
     analyze_put_protection(portfolio_df_combined)
+    print_chart_gallery()
 
     # =================================================================
     # Phase 4: 執行摘要
     # =================================================================
-    print("\n==================================================")
-    print("Execution Summary:")
+    print("\n## Execution Summary")
     cache_stats = get_cache_stats()
-    print(f"  - Cache Loads: {cache_stats['loads']}")
-    print(f"  - Cache Misses (Network Fetches): {cache_stats['misses']}")
-    print(f"  - Price Calibrations Applied: {CALIBRATIONS}")
-    print("==================================================")
+    print(f"- Cache Loads: {cache_stats['loads']}")
+    print(f"- Cache Misses (Network Fetches): {cache_stats['misses']}")
+    print(f"- Price Calibrations Applied: {CALIBRATIONS}")
 
     # --- Cleanup: 關閉 Logger 並恢復 stdout ---
     if isinstance(sys.stdout, DualLogger):

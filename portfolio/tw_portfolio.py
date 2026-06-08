@@ -1,7 +1,8 @@
 import numpy as np
 import pandas as pd
 
-from .split_rules import apply_tw_split_events
+from .positions import calculate_dividends_for_position, calculate_total_buy_for_position
+from .split_rules import apply_tw_split_events, tw_split_price_factors
 
 def process_tw_data(
     *,
@@ -76,7 +77,12 @@ def process_tw_data(
                 continue
             if yf_price and yf_price > 0:
                 factor = float(csv_price) / yf_price
-                price_data_tw[symbol] = price_data_tw[symbol] * factor
+                split_factors = tw_split_price_factors(symbol, price_data_tw.index)
+                expected_factor = float(split_factors.loc[pd.Timestamp(first_trade_date)])
+                if expected_factor > 1.0 and 0.7 <= (factor / expected_factor) <= 1.3:
+                    price_data_tw[symbol] = price_data_tw[symbol] * split_factors
+                else:
+                    price_data_tw[symbol] = price_data_tw[symbol] * factor
                 calibration_count += 1
         if calibration_count:
             record_calibrations(calibration_count)
@@ -134,18 +140,26 @@ def process_tw_data(
                 print(f"Error fetching data for {stock_code}: {e}")
                 current_price = get_latest_available_price(price_data_tw.get(stock_code))
             current_value = current_price * count if pd.notna(current_price) else np.nan
-            gain = current_value - aggregated_cost
-            gain_per = (gain / aggregated_cost) * 100 if aggregated_cost != 0 else 0
+            price_pnl = current_value - aggregated_cost
+            dividend = calculate_dividends_for_position(stock_code, df_tw)
+            dividend_twd = calculate_dividends_for_position(stock_code, df_tw, amount_col="Amount_TWD")
+            gain = price_pnl + dividend
+            total_buy = calculate_total_buy_for_position(stock_code, df_tw)
+            gain_per = (gain / total_buy) * 100 if total_buy != 0 else 0
         else:
-            total_buy, total_pnl, total_pnl_pct = calculate_total_pnl_for_closed_position(stock_code, df_tw)
+            total_buy, price_pnl, _ = calculate_total_pnl_for_closed_position(stock_code, df_tw)
+            dividend = calculate_dividends_for_position(stock_code, df_tw)
+            dividend_twd = calculate_dividends_for_position(stock_code, df_tw, amount_col="Amount_TWD")
+            total_pnl = price_pnl + dividend
+            total_pnl_pct = (total_pnl / total_buy * 100) if total_buy != 0 else 0
             current_price = np.nan
             current_value = np.nan
             aggregated_cost = total_buy
             gain = total_pnl
             gain_per = total_pnl_pct
-        data_list_tw.append([stock_code, name, count, current_price, current_value, aggregated_cost, gain, gain_per])
+        data_list_tw.append([stock_code, name, count, current_price, current_value, aggregated_cost, price_pnl, dividend, dividend_twd, gain, gain_per])
 
-    headers = ["Symbol", "Name", "Quantity_now", "Price", "Price_Total", "Cost", "Total PnL", "Total PnL(%)"]
+    headers = ["Symbol", "Name", "Quantity_now", "Price", "Price_Total", "Cost", "Price PnL", "Dividend", "Dividend_TWD", "Total PnL", "Total PnL(%)"]
     portfolio_df_tw = pd.DataFrame(data_list_tw, columns=headers)
 
     return {

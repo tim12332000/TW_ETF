@@ -4,6 +4,8 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+from .positions import calculate_dividends_for_position, calculate_total_buy_for_position
+
 
 def _is_split_like_action(action_value):
     action = str(action_value).strip().lower()
@@ -342,18 +344,24 @@ def process_us_data(
                 print(f"Error fetching data for {stock_code}: {e}")
                 current_price = get_latest_available_price(price_data_us.get(stock_code))
             current_value = current_price * count if pd.notna(current_price) else np.nan
-            gain = current_value - aggregated_cost
-            gain_per = (gain / aggregated_cost) * 100 if aggregated_cost != 0 else 0
+            price_pnl = current_value - aggregated_cost
+            dividend = calculate_dividends_for_position(stock_code, df_us)
+            gain = price_pnl + dividend
+            total_buy = calculate_total_buy_for_position(stock_code, df_us)
+            gain_per = (gain / total_buy) * 100 if total_buy != 0 else 0
         else:
-            total_buy, total_pnl, total_pnl_pct = calculate_total_pnl_for_closed_position(stock_code, df_us)
+            total_buy, price_pnl, _ = calculate_total_pnl_for_closed_position(stock_code, df_us)
+            dividend = calculate_dividends_for_position(stock_code, df_us)
+            total_pnl = price_pnl + dividend
+            total_pnl_pct = (total_pnl / total_buy * 100) if total_buy != 0 else 0
             current_price = np.nan
             current_value = np.nan
             aggregated_cost = total_buy
             gain = total_pnl
             gain_per = total_pnl_pct
-        data_list_us.append([stock_code, name, count, current_price, current_value, aggregated_cost, gain, gain_per])
+        data_list_us.append([stock_code, name, count, current_price, current_value, aggregated_cost, price_pnl, dividend, gain, gain_per])
 
-    headers = ["Symbol", "Name", "Quantity_now", "Price", "Price_Total", "Cost", "Total PnL", "Total PnL(%)"]
+    headers = ["Symbol", "Name", "Quantity_now", "Price", "Price_Total", "Cost", "Price PnL", "Dividend", "Total PnL", "Total PnL(%)"]
     portfolio_df_us = pd.DataFrame(data_list_us, columns=headers)
 
     return {

@@ -14,6 +14,17 @@ rcParams['font.sans-serif'] = ['Microsoft YaHei']
 rcParams['axes.unicode_minus'] = False
 
 
+def color_signed(value, text):
+    try:
+        numeric = float(value)
+    except (TypeError, ValueError):
+        return text
+    if pd.isna(numeric) or numeric == 0:
+        return text
+    color = "#188038" if numeric > 0 else "#d93025"
+    return f'<span style="color: {color}; font-weight: 600">{text}</span>'
+
+
 def plot_stock_performance(tw_res, us_res):
     plt.figure(figsize=(14, 8))
     _process_stock_twr(tw_res, 'TW', plt)
@@ -121,7 +132,7 @@ def print_rebalance_recommendation(portfolio_df_combined, usd_to_twd):
             current_values_usd['006208'] += val_usd
             total_pool_usd += val_usd
 
-    print('\n=== Target Allocation And Rebalance Suggestion ===')
+    print('\n## Target Allocation And Rebalance Suggestion')
     total_pool_twd = total_pool_usd * usd_to_twd
     print(f'Rebalance capital pool (stocks only): {total_pool_twd:,.0f} TWD')
 
@@ -132,11 +143,12 @@ def print_rebalance_recommendation(portfolio_df_combined, usd_to_twd):
         target_twd = total_pool_twd * target_pct
         diff_twd = target_twd - curr_twd
         curr_pct = (curr_twd / total_pool_twd) * 100 if total_pool_twd > 0 else 0
-        action_str = f'+{diff_twd:,.0f}' if diff_twd > 0 else f'{diff_twd:,.0f}'
+        action_text = f'+{diff_twd:,.0f}' if diff_twd > 0 else f'{diff_twd:,.0f}'
+        action_str = color_signed(diff_twd, action_text)
         rows.append([key, f'{target_pct*100:.1f}%', f'{curr_pct:.1f}%', f'{curr_twd:,.0f}', f'{target_twd:,.0f}', action_str])
 
     headers = ['Asset', 'Target %', 'Current %', 'Current Amount (TWD)', 'Target Amount (TWD)', 'Suggested Action (TWD)']
-    print(tabulate(rows, headers=headers, tablefmt='psql', stralign='right'))
+    print(tabulate(rows, headers=headers, tablefmt='github', stralign='right'))
 
 
 def black_scholes_put(S, K, T, r, sigma):
@@ -152,14 +164,9 @@ def black_scholes_put(S, K, T, r, sigma):
 
 
 def analyze_put_protection(portfolio_df):
-    high_beta_tickers = ['QLD', '00631L.TW', 'TQQQ', 'SOXL', 'TECL', 'NVDL']
-    hedge_tickers = ['EDV', 'TLT', 'TMF', 'ZROZ', 'UBT']
     df = portfolio_df.copy()
-    high_beta_val = 0
-    market_beta_val = 0
-    hedge_val = 0
-    total_stock_val = 0
     put_contracts = []
+    non_put_positions = []
 
     for _, row in df.iterrows():
         sym = str(row['Symbol'])
@@ -170,24 +177,8 @@ def analyze_put_protection(portfolio_df):
             if match or (('QQQ' in sym or 'TSM' in sym) and 'P' in sym):
                 put_contracts.append(row)
                 continue
-        total_stock_val += val
-        is_high = False
-        for hb in high_beta_tickers:
-            if hb.split('.')[0] in sym:
-                high_beta_val += val
-                is_high = True
-                break
-        if is_high:
-            continue
-        is_hedge = False
-        for hedge in hedge_tickers:
-            if hedge in sym:
-                hedge_val += val
-                is_hedge = True
-                break
-        if is_hedge:
-            continue
-        market_beta_val += val
+        if qty != 0 and val > 0:
+            non_put_positions.append({'sym': sym, 'value': val})
 
     if not put_contracts:
         return
@@ -221,6 +212,7 @@ def analyze_put_protection(portfolio_df):
                 'expiry': expiry,
                 'contracts': contracts,
                 'cost_basis': cost_basis,
+                'market_value': float(put['Price_Total']),
                 's0': s0,
             })
         except Exception:
@@ -228,9 +220,37 @@ def analyze_put_protection(portfolio_df):
     if not puts_info:
         return
 
+    def stress_assumption(symbol, drop):
+        symbol = str(symbol).upper()
+        if symbol in {'EDV', 'TLT', 'ZROZ'}:
+            if drop <= -0.30:
+                return 0.15, 'Long Treasury +15% in crash'
+            if drop <= -0.20:
+                return 0.05, 'Long Treasury +5% in bear market'
+            return 0.0, 'Long Treasury unchanged'
+        if symbol in {'TMF', 'UBT'}:
+            if drop <= -0.30:
+                return 0.30, 'Levered Treasury +30% in crash'
+            if drop <= -0.20:
+                return 0.10, 'Levered Treasury +10% in bear market'
+            return 0.0, 'Levered Treasury unchanged'
+        if symbol in {'QLD', '00631L'}:
+            return max(drop * 2.0, -0.99), '2x equity exposure'
+        if symbol == 'TQQQ':
+            return max(drop * 3.0, -0.99), '3x equity exposure'
+        if symbol in {'TSLA'}:
+            return max(drop * 1.5, -0.99), 'High beta equity 1.5x'
+        if symbol in {'UNH'}:
+            return drop * 0.8, 'Defensive equity 0.8x'
+        return drop, 'Broad equity exposure'
+
+    for put_info in puts_info:
+        put_info['notional'] = put_info['s0'] * 100 * put_info['contracts']
+
     today = datetime.now()
     r = 0.045
-    portfolio_total = total_stock_val
+    base_non_put_value = sum(pos['value'] for pos in non_put_positions)
+    current_put_market_value = sum(put_info['market_value'] for put_info in puts_info)
     scenarios = [
         {'drop': 0.0, 'desc': 'Current'},
         {'drop': -0.10, 'desc': 'Correction'},
@@ -240,10 +260,23 @@ def analyze_put_protection(portfolio_df):
         {'drop': -0.50, 'desc': 'Collapse'},
     ]
 
-    print('\n=== Put Protection Analysis ===')
+    print('\n## Put Protection Analysis')
+    print('This is a full-portfolio stress test. Every current non-put holding is shocked by a simple asset-type rule, then current puts are revalued and added back.')
     for put_info in puts_info:
         print(f"Put: {put_info['sym']}, Strike ${put_info['strike']}, Exp {put_info['expiry'].strftime('%Y-%m-%d')} (Underlying: {put_info['underlying']} @ ${put_info['s0']:.2f})")
-    print(f'Total stock assets: ${portfolio_total:,.0f} USD')
+    print(f'Current non-put assets: ${base_non_put_value:,.0f} USD')
+    print(f'Current put market value: ${current_put_market_value:,.0f} USD')
+    print('| Put | Underlying | Current Market Value | Put Notional |')
+    print('| :--- | :--- | ---: | ---: |')
+    for put_info in puts_info:
+        print(f"| {put_info['sym']} | {put_info['underlying']} | ${put_info['market_value']:,.0f} | ${put_info['notional']:,.0f} |")
+
+    print('| Holding | Current Value | Stress Rule |')
+    print('| :--- | ---: | :--- |')
+    for pos in sorted(non_put_positions, key=lambda item: item['value'], reverse=True):
+        _, rule = stress_assumption(pos['sym'], -0.20)
+        print(f"| {pos['sym']} | ${pos['value']:,.0f} | {rule} |")
+
     print('| Scenario | Base Drop | Total Assets (Unhedged) | Total Assets (Hedged) | Total Puts Value | Protection |')
     print('| :--- | :--- | :--- | :--- | :--- | :--- |')
 
@@ -253,60 +286,49 @@ def analyze_put_protection(portfolio_df):
 
     for scenario in scenarios:
         drop = scenario['drop']
-        drop_2x = max(drop * 2.0, -0.99)
-        new_high = high_beta_val * (1 + drop_2x)
-        bond_change = 0.0
-        if drop <= -0.20:
-            bond_change = 0.05
-        if drop <= -0.30:
-            bond_change = 0.15
-        new_hedge = hedge_val * (1 + bond_change)
-        new_market = market_beta_val * (1 + drop)
-        new_total_no_put = new_high + new_hedge + new_market
+        new_total_no_put = sum(pos['value'] * (1 + stress_assumption(pos['sym'], drop)[0]) for pos in non_put_positions)
         total_put_val = 0
         for put_info in puts_info:
             if put_info['expiry'] <= today:
                 continue
-            days_to_exp = (put_info['expiry'] - today).days
-            T = days_to_exp / 365.0
-            new_u = put_info['s0'] * (1 + drop)
-            vol = 0.20 + abs(drop) * 0.8
-            put_val_share = black_scholes_put(new_u, put_info['strike'], T, r, vol)
-            total_put_val += put_val_share * 100 * put_info['contracts']
+            if drop == 0:
+                total_put_val += put_info['market_value']
+            else:
+                days_to_exp = (put_info['expiry'] - today).days
+                T = days_to_exp / 365.0
+                new_u = put_info['s0'] * (1 + drop)
+                vol = 0.20 + abs(drop) * 0.8
+                put_val_share = black_scholes_put(new_u, put_info['strike'], T, r, vol)
+                total_put_val += put_val_share * 100 * put_info['contracts']
         new_total_with_put = new_total_no_put + total_put_val
         diff = new_total_with_put - new_total_no_put
-        print(f"| {scenario['desc']} | {drop*100:.0f}% | ${new_total_no_put:,.0f} | **${new_total_with_put:,.0f}** | ${total_put_val:,.0f} | +${diff:,.0f} |")
+        protection = color_signed(diff, f"+${diff:,.0f}") if diff > 0 else f"${diff:,.0f}"
+        print(f"| {scenario['desc']} | {drop*100:.0f}% | ${new_total_no_put:,.0f} | **${new_total_with_put:,.0f}** | ${total_put_val:,.0f} | {protection} |")
 
     for drop in drops:
-        drop_2x = max(drop * 2.0, -0.99)
-        new_high = high_beta_val * (1 + drop_2x)
-        bond_change = 0.0
-        if drop <= -0.20:
-            bond_change = 0.05
-        if drop <= -0.30:
-            bond_change = 0.15
-        new_hedge = hedge_val * (1 + bond_change)
-        new_market = market_beta_val * (1 + drop)
-        val_no = new_high + new_hedge + new_market
+        val_no = sum(pos['value'] * (1 + stress_assumption(pos['sym'], drop)[0]) for pos in non_put_positions)
         total_pv = 0
         for put_info in puts_info:
             if put_info['expiry'] <= today:
                 continue
-            days_to_exp = (put_info['expiry'] - today).days
-            T = days_to_exp / 365.0
-            new_u = put_info['s0'] * (1 + drop)
-            vol = 0.20 + abs(drop) * 0.8
-            pv_share = black_scholes_put(new_u, put_info['strike'], T, r, vol)
-            total_pv += pv_share * 100 * put_info['contracts']
+            if drop == 0:
+                total_pv += put_info['market_value']
+            else:
+                days_to_exp = (put_info['expiry'] - today).days
+                T = days_to_exp / 365.0
+                new_u = put_info['s0'] * (1 + drop)
+                vol = 0.20 + abs(drop) * 0.8
+                pv_share = black_scholes_put(new_u, put_info['strike'], T, r, vol)
+                total_pv += pv_share * 100 * put_info['contracts']
         wealth_no_hedge.append(val_no)
         wealth_with_hedge.append(val_no + total_pv)
 
     fig, ax1 = plt.subplots(figsize=(10, 6))
-    ax1.plot(drops * 100, wealth_no_hedge, label='Total Assets (No Puts)', color='red', linewidth=2)
-    ax1.plot(drops * 100, wealth_with_hedge, label='Total Assets (With Puts)', color='blue', linewidth=2)
+    ax1.plot(drops * 100, wealth_no_hedge, label='Full Portfolio Stress (No Puts)', color='red', linewidth=2)
+    ax1.plot(drops * 100, wealth_with_hedge, label='Full Portfolio Stress (With Puts)', color='blue', linewidth=2)
     ax1.fill_between(drops * 100, wealth_no_hedge, wealth_with_hedge, color='green', alpha=0.1, label='Protection')
-    ax1.set_title('Total Asset Protection (Market Drop)')
-    ax1.set_xlabel('Market Drop (%)')
+    ax1.set_title('Put Protection Full Portfolio Stress')
+    ax1.set_xlabel('Base Equity Drop (%)')
     ax1.set_ylabel('Total Asset Value (USD)')
     ax1.grid(True, alpha=0.3)
 
