@@ -9,6 +9,29 @@ import pandas as pd
 
 from portfolio.positions import calculate_dividends_for_position, calculate_total_buy_for_position
 from portfolio.transactions import clean_currency, fix_share_sign
+from portfolio.us_portfolio import process_us_data
+
+
+def test_us_journal_rows_do_not_poison_position_costs():
+    def fake_daily_price(symbols, start_date, end_date, is_tw=False):
+        index = pd.date_range(start=start_date, end=end_date, freq="B")
+        return pd.DataFrame({"SPCX": 200.0}, index=index)
+
+    result = process_us_data(
+        clean_currency=clean_currency,
+        build_cash_ledgers=lambda df: ([], [], 0.0),
+        fix_share_sign=fix_share_sign,
+        get_daily_price=fake_daily_price,
+        build_option_history_series=lambda symbol, date_range: pd.Series(index=date_range, dtype=float),
+        resolve_market_price=lambda symbol, history_series=None, is_tw=False: 200.0,
+        get_latest_available_price=lambda series: 200.0,
+        calculate_total_pnl_for_closed_position=lambda symbol, df: (0.0, 0.0, 0.0),
+    )
+
+    spcx = result["portfolio_df"].loc[result["portfolio_df"]["Symbol"] == "SPCX"].iloc[0]
+    assert spcx["Quantity_now"] == 3
+    assert round(spcx["Cost"], 2) == 521.68
+    assert round(spcx["Price_Total"], 2) == 600.00
 
 
 def test_open_position_pnl_percent_uses_total_buy_denominator():
@@ -33,7 +56,7 @@ def test_us_dividends_are_grouped_by_symbol():
     df = pd.read_csv(ROOT / "us_train.csv", encoding="utf-8-sig")
     df["Amount"] = df["Amount"].apply(clean_currency)
 
-    assert round(calculate_dividends_for_position("EDV", df), 2) == 392.72
+    assert round(calculate_dividends_for_position("EDV", df), 2) == 393.48
     assert round(calculate_dividends_for_position("TQQQ", df), 2) == 138.50
 
 

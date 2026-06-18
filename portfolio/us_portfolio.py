@@ -324,7 +324,7 @@ def process_us_data(
         stock_code = row["Symbol"]
         stock_name = row["Symbol"]
         count = row["Quantity"]
-        cost = float(row["Amount"])
+        cost = float(row["Amount"]) if pd.notna(row["Amount"]) else 0.0
         if pd.isna(stock_code) or pd.isna(count):
             continue
         if stock_code not in stock_counts_us:
