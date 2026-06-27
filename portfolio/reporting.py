@@ -104,9 +104,10 @@ def _process_stock_twr(res_data, region, plt_obj):
 
 
 def print_rebalance_recommendation(portfolio_df_combined, usd_to_twd):
+    sp500_bucket = 'SPLG / SPYM / 00646'
     targets = {
         'QLD': 0.30,
-        'SPLG / SPYM': 0.25,
+        sp500_bucket: 0.25,
         '00631L': 0.15,
         '006208': 0.30,
     }
@@ -122,8 +123,8 @@ def print_rebalance_recommendation(portfolio_df_combined, usd_to_twd):
         if 'QLD' in sym:
             current_values_usd['QLD'] += val_usd
             total_pool_usd += val_usd
-        elif 'SPLG' in sym or 'SPYM' in sym:
-            current_values_usd['SPLG / SPYM'] += val_usd
+        elif 'SPLG' in sym or 'SPYM' in sym or '00646' in sym:
+            current_values_usd[sp500_bucket] += val_usd
             total_pool_usd += val_usd
         elif '00631L' in sym:
             current_values_usd['00631L'] += val_usd

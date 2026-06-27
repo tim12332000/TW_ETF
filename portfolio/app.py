@@ -56,7 +56,7 @@ REPORT_CHARTS = [
     ('Asset Pie Chart', 'asset_pie_chart.png'),
     ('Monthly Investment', 'monthly_investment.png'),
     ('Stock Performance', 'stock_performance.png'),
-    ('Proxy Hedge 情境保護率', 'proxy_hedge_coverage.png'),
+    ('代理避險情境保護率', 'proxy_hedge_coverage.png'),
     ('Put 避險保護全投組壓力測試', 'total_asset_protection.png'),
 ]
 
@@ -221,6 +221,34 @@ def _put_proxy_inputs(result, date_index, put_symbol, proxy_symbol):
     return contracts, proxy_px, float(premium_paid)
 
 
+def _put_entry_proxy_price(result, put_symbol, proxy_px):
+    df = result['df'].copy()
+    df['Date'] = pd.to_datetime(df['Date']).dt.normalize()
+    rows = df.loc[df['Symbol'] == put_symbol].copy()
+    if rows.empty:
+        return None, np.nan
+
+    rows['Amount'] = pd.to_numeric(rows['Amount'], errors='coerce')
+    buy_rows = rows.loc[rows['Amount'] < 0].sort_values('Date')
+    if buy_rows.empty:
+        buy_rows = rows.loc[pd.to_numeric(rows['Quantity'], errors='coerce') > 0].sort_values('Date')
+    if buy_rows.empty:
+        return None, np.nan
+
+    buy_date = pd.Timestamp(buy_rows.iloc[0]['Date']).normalize()
+    px = proxy_px.reindex(proxy_px.index.union([buy_date])).sort_index().ffill().bfill().loc[buy_date]
+    return buy_date, float(px)
+
+
+def _put_entry_cost(result, put_symbol):
+    df = result['df'].copy()
+    rows = df.loc[df['Symbol'] == put_symbol].copy()
+    if rows.empty:
+        return np.nan
+    rows['Amount'] = pd.to_numeric(rows['Amount'], errors='coerce')
+    return float(-rows.loc[rows['Amount'] < 0, 'Amount'].sum())
+
+
 def _scenario_protection_rate(contracts, proxy_px, strike, exposure, scenario):
     scenario_proxy_px = proxy_px * (1 + scenario)
     put_payout = (strike - scenario_proxy_px).clip(lower=0) * 100.0 * contracts
@@ -228,7 +256,100 @@ def _scenario_protection_rate(contracts, proxy_px, strike, exposure, scenario):
     return (put_payout / pool_loss.replace(0, np.nan)) * 100.0
 
 
-def plot_proxy_hedge_coverage(tw_result, us_result, date_index):
+def _format_usd(value):
+    if value is None or pd.isna(value):
+        return "N/A"
+    return f"${value:,.0f}"
+
+
+def _format_rate(value):
+    if value is None or pd.isna(value):
+        return "N/A"
+    return f"{value:.1f}%"
+
+
+def _parse_put_expiry(occ_symbol):
+    date_part = occ_symbol[-15:-9]
+    return pd.to_datetime(date_part, format='%y%m%d')
+
+
+def _parse_put_strike(occ_symbol):
+    return float(str(occ_symbol)[-8:]) / 1000.0
+
+
+def _recommended_put_expiry(proxy_symbol, today):
+    fallback = (today + pd.DateOffset(months=12)).normalize()
+    try:
+        expiries = [pd.Timestamp(exp) for exp in yf.Ticker(proxy_symbol).options]
+    except Exception:
+        expiries = []
+    candidates = [
+        exp for exp in expiries
+        if 270 <= (exp.normalize() - today.normalize()).days <= 395
+    ]
+    if not candidates:
+        return fallback
+    return min(candidates, key=lambda exp: abs((exp.normalize() - today.normalize()).days - 365))
+
+
+def _option_buy_price(row):
+    ask = float(row.get('ask') or 0)
+    bid = float(row.get('bid') or 0)
+    last = float(row.get('lastPrice') or 0)
+    if ask > 0:
+        return ask, 'ask'
+    if bid > 0 and last > 0:
+        return max(last, bid), 'last/bid'
+    if last > 0:
+        return last, 'last'
+    return np.nan, 'N/A'
+
+
+def _find_reset_put_hedge(proxy_symbol, expiry, proxy_px, contracts, exposure, target_moneyness=0.50, protection_scenario=-0.90):
+    target_strike = proxy_px * target_moneyness
+    try:
+        chain = yf.Ticker(proxy_symbol).option_chain(expiry.strftime('%Y-%m-%d')).puts.copy()
+    except Exception:
+        return None
+
+    candidates = []
+    for _, row in chain.iterrows():
+        strike = float(row['strike'])
+        buy_price, price_basis = _option_buy_price(row)
+        if pd.isna(buy_price) or buy_price <= 0:
+            continue
+
+        reset_contracts = max(int(np.ceil(contracts)), 1)
+        scenario_px = proxy_px * (1 + protection_scenario)
+        payout = max(strike - scenario_px, 0) * 100.0 * reset_contracts
+        scenario_loss = exposure * abs(protection_scenario)
+        protection_rate = (payout / scenario_loss) * 100.0 if scenario_loss > 0 else np.nan
+        gross_cost = reset_contracts * buy_price * 100.0
+        candidates.append({
+            'strike': strike,
+            'target_strike': target_strike,
+            'moneyness': (strike / proxy_px) * 100.0 if proxy_px > 0 else np.nan,
+            'contracts': reset_contracts,
+            'buy_price': buy_price,
+            'price_basis': price_basis,
+            'gross_cost': gross_cost,
+            'protection_rate': protection_rate,
+            'scenario_px': scenario_px,
+        })
+
+    if not candidates:
+        return None
+    return min(candidates, key=lambda item: (abs(item['strike'] - target_strike), item['gross_cost']))
+
+
+def _current_put_market_value(put_symbol, contracts):
+    if contracts <= 0:
+        return 0.0
+    price = get_current_price_yf(put_symbol, is_tw=False, fallback_price=0)
+    return float(price or 0) * 100.0 * contracts
+
+
+def plot_proxy_hedge_coverage(tw_result, us_result, date_index, final_portfolio_value_us, invested_capital_us):
     us_values = build_symbol_value_history(us_result, date_index, us_result['price_data'])
     tw_values = build_symbol_value_history(tw_result, date_index, tw_result['price_data'])
 
@@ -272,7 +393,7 @@ def plot_proxy_hedge_coverage(tw_result, us_result, date_index):
     plot_df.plot(ax=ax, linewidth=2)
     ax.axhline(30, color='orange', linestyle=':', linewidth=1, label='參考線 30%')
     ax.axhline(50, color='green', linestyle=':', linewidth=1, label='參考線 50%')
-    ax.set_title('Proxy Hedge 情境保護率')
+    ax.set_title('代理避險情境保護率')
     ax.set_xlabel('Date')
     ax.set_ylabel('Put 預估 payout / 資產池情境損失 (%)')
     ax.grid(True, alpha=0.3)
@@ -288,13 +409,19 @@ def plot_proxy_hedge_coverage(tw_result, us_result, date_index):
     latest_t = float(tsm_px.dropna().iloc[-1])
     latest_q_contracts = float(qqq_contracts.iloc[-1])
     latest_t_contracts = float(tsm_contracts.iloc[-1])
+    qqq_current_put_value = _current_put_market_value('QQQ270115P00350000', latest_q_contracts)
+    tsm_current_put_value = _current_put_market_value('TSM270115P00200000', latest_t_contracts)
+    qqq_buy_date, qqq_buy_proxy_px = _put_entry_proxy_price(us_result, 'QQQ270115P00350000', qqq_px)
+    tsm_buy_date, tsm_buy_proxy_px = _put_entry_proxy_price(us_result, 'TSM270115P00200000', tsm_px)
+    qqq_entry_cost = _put_entry_cost(us_result, 'QQQ270115P00350000')
+    tsm_entry_cost = _put_entry_cost(us_result, 'TSM270115P00200000')
 
     def current_rate(proxy_px, strike, contracts, exposure, scenario):
         payout = max(strike - proxy_px * (1 + scenario), 0) * 100.0 * contracts
         loss = exposure * abs(scenario)
         return (payout / loss) * 100.0 if loss > 0 else np.nan
 
-    print('\n## Proxy Hedge 情境保護率')
+    print('\n## 代理避險情境保護率')
     print('QQQ Put 對應美股風險曝險；TSM Put 對應台股風險曝險。保護率用履約價計算：Put payout / 資產池情境損失。')
     scenario_headers = ' | '.join(f'{s:.0%} 保護率' for s in scenarios)
     scenario_align = ' | '.join('---:' for _ in scenarios)
@@ -308,6 +435,52 @@ def plot_proxy_hedge_coverage(tw_result, us_result, date_index):
     t_cells = ' | '.join(f'{rate:.1f}%' for rate in t_rates)
     print(f"| QQQ Put | 美股風險曝險 | {q_cost_rate:.2f}% | {q_cells} |")
     print(f"| TSM Put | 台股風險曝險 | {t_cost_rate:.2f}% | {t_cells} |")
+
+    total_put_premium = qqq_premium + tsm_premium
+    total_put_market_value = qqq_current_put_value + tsm_current_put_value
+    total_profit_us = final_portfolio_value_us - invested_capital_us
+    print('\n### Put 成本紀錄')
+    print('保費是成本紀錄；重設組合用履約價 / 今日標的價約 50% 的災難保險規則，並用即時 option chain 估算成本。')
+    print('| 項目 | 數值 |')
+    print('| :--- | ---: |')
+    print(f"| 投組市值 | {_format_usd(final_portfolio_value_us)} |")
+    print(f"| 累積獲利 | {_format_usd(total_profit_us)} |")
+    print(f"| 目前 Put 已投入保費 | {_format_usd(total_put_premium)} |")
+    print(f"| 目前 Put 市值（可抵扣重設成本） | {_format_usd(total_put_market_value)} |")
+    print(f"| Put 已投入保費 / 投組市值 | {(total_put_premium / final_portfolio_value_us) * 100:.2f}% |")
+
+    q_rate_map = dict(zip(scenarios, q_rates))
+    t_rate_map = dict(zip(scenarios, t_rates))
+    today = pd.Timestamp.today().normalize()
+    qqq_reset_expiry = _recommended_put_expiry('QQQ', today)
+    tsm_reset_expiry = _recommended_put_expiry('TSM', today)
+    print('\n### Put 重設避險組合')
+    print('數學規則：出清/抵扣現有 Put 後，重新建立履約價 / 今日標的價最接近 50% 的 Put；這是深價外災難保險，不保證 -50% 情境有固定保護率。')
+    print('| Proxy Put | 對應資產池 | 原買入日 | 原標的價 | 原履約價 | 原履約價/原標的價 | 原 Put 成本 | 今日原 Put 市值 | 今日標的價 | 目前保護率 | 重設到期日 | 目標履約價 | 重設履約價 | 重設履約價/今日標的價 | 張數 | 重設 Put 現價 | 重設毛成本 | 淨重設成本 | 重設後 -90% 保護率 |')
+    print('| :--- | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |')
+
+    reset_rows = [
+        ('QQQ Put', '美股風險曝險', 'QQQ270115P00350000', qqq_buy_date, qqq_buy_proxy_px, qqq_entry_cost, latest_q, latest_q_contracts, latest_us_exposure, q_rate_map, qqq_reset_expiry, qqq_current_put_value),
+        ('TSM Put', '台股風險曝險', 'TSM270115P00200000', tsm_buy_date, tsm_buy_proxy_px, tsm_entry_cost, latest_t, latest_t_contracts, latest_tw_exposure, t_rate_map, tsm_reset_expiry, tsm_current_put_value),
+    ]
+    for name, pool, put_symbol, buy_date, buy_proxy_px, entry_cost, proxy_px, contracts, exposure, rate_map, reset_expiry, current_put_value in reset_rows:
+        current_status = f"-50% {rate_map[-0.50]:.1f}%，-90% {rate_map[-0.90]:.1f}%"
+        buy_date_text = buy_date.strftime('%Y-%m-%d') if buy_date is not None else 'N/A'
+        original_strike = _parse_put_strike(put_symbol)
+        original_moneyness = (original_strike / buy_proxy_px) * 100.0 if buy_proxy_px else np.nan
+        reset_expiry_text = reset_expiry.strftime('%Y-%m-%d')
+        reset = _find_reset_put_hedge(name.split()[0], reset_expiry, proxy_px, contracts, exposure)
+        if reset is None:
+            print(f"| {name} | {pool} | {buy_date_text} | {_format_usd(buy_proxy_px)} | {_format_usd(original_strike)} | {_format_rate(original_moneyness)} | {_format_usd(entry_cost)} | {_format_usd(current_put_value)} | {_format_usd(proxy_px)} | {current_status} | {reset_expiry_text} | {_format_usd(proxy_px * 0.50)} | N/A | N/A | N/A | N/A | N/A | N/A | N/A |")
+            continue
+        net_cost = reset['gross_cost'] - current_put_value
+        print(
+            f"| {name} | {pool} | {buy_date_text} | {_format_usd(buy_proxy_px)} | {_format_usd(original_strike)} | {_format_rate(original_moneyness)} | "
+            f"{_format_usd(entry_cost)} | {_format_usd(current_put_value)} | {_format_usd(proxy_px)} | {current_status} | {reset_expiry_text} | "
+            f"{_format_usd(reset['target_strike'])} | ${reset['strike']:,.0f} | {_format_rate(reset['moneyness'])} | {reset['contracts']} | "
+            f"${reset['buy_price']:.2f} ({reset['price_basis']}) | "
+            f"{_format_usd(reset['gross_cost'])} | {_format_usd(net_cost)} | {_format_rate(reset['protection_rate'])} |"
+        )
     print('圖表已儲存至 output/proxy_hedge_coverage.png')
 
 
@@ -851,7 +1024,13 @@ def main():
     plot_stock_performance(tw_result, us_result)
 
     # --- 3-8b. Proxy Put 覆蓋率 ---
-    plot_proxy_hedge_coverage(tw_result, us_result, date_index)
+    plot_proxy_hedge_coverage(
+        tw_result,
+        us_result,
+        date_index,
+        final_portfolio_value_us,
+        invested_capital_us,
+    )
 
     # --- 3-9. Put 保護力分析 ---
     analyze_put_protection(portfolio_df_combined)
