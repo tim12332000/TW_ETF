@@ -249,6 +249,24 @@ def _put_entry_cost(result, put_symbol):
     return float(-rows.loc[rows['Amount'] < 0, 'Amount'].sum())
 
 
+def _current_put_symbol(result, proxy_symbol, fallback_symbol):
+    df = result['df'].copy()
+    qty = pd.to_numeric(df.get('Quantity'), errors='coerce').fillna(0)
+    symbols = df.get('Symbol').astype(str)
+    candidates = symbols[
+        symbols.str.startswith(proxy_symbol)
+        & symbols.str.contains('P', regex=False)
+    ].unique()
+    open_symbols = []
+    for symbol in candidates:
+        symbol_qty = qty.loc[symbols == symbol].sum()
+        if symbol_qty > 0:
+            open_symbols.append(symbol)
+    if not open_symbols:
+        return fallback_symbol
+    return max(open_symbols, key=lambda symbol: _parse_put_expiry(symbol))
+
+
 def _scenario_protection_rate(contracts, proxy_px, strike, exposure, scenario):
     scenario_proxy_px = proxy_px * (1 + scenario)
     put_payout = (strike - scenario_proxy_px).clip(lower=0) * 100.0 * contracts
@@ -375,15 +393,19 @@ def plot_proxy_hedge_coverage(tw_result, us_result, date_index, final_portfolio_
 
     us_exposure = _weighted_exposure(us_values, us_weights)
     tw_exposure = _weighted_exposure(tw_values, tw_weights)
-    qqq_contracts, qqq_px, qqq_premium = _put_proxy_inputs(us_result, date_index, 'QQQ270115P00350000', 'QQQ')
-    tsm_contracts, tsm_px, tsm_premium = _put_proxy_inputs(us_result, date_index, 'TSM270115P00200000', 'TSM')
+    qqq_put_symbol = _current_put_symbol(us_result, 'QQQ', 'QQQ270115P00350000')
+    tsm_put_symbol = _current_put_symbol(us_result, 'TSM', 'TSM270115P00200000')
+    qqq_strike = _parse_put_strike(qqq_put_symbol)
+    tsm_strike = _parse_put_strike(tsm_put_symbol)
+    qqq_contracts, qqq_px, qqq_premium = _put_proxy_inputs(us_result, date_index, qqq_put_symbol, 'QQQ')
+    tsm_contracts, tsm_px, tsm_premium = _put_proxy_inputs(us_result, date_index, tsm_put_symbol, 'TSM')
     scenarios = [-0.30, -0.50, -0.90]
 
     plot_cols = {}
     for scenario in scenarios:
         label_pct = f"{scenario:.0%}"
-        plot_cols[f'QQQ Put / 美股 {label_pct}'] = _scenario_protection_rate(qqq_contracts, qqq_px, 350.0, us_exposure, scenario)
-        plot_cols[f'TSM Put / 台股 {label_pct}'] = _scenario_protection_rate(tsm_contracts, tsm_px, 200.0, tw_exposure, scenario)
+        plot_cols[f'QQQ Put / 美股 {label_pct}'] = _scenario_protection_rate(qqq_contracts, qqq_px, qqq_strike, us_exposure, scenario)
+        plot_cols[f'TSM Put / 台股 {label_pct}'] = _scenario_protection_rate(tsm_contracts, tsm_px, tsm_strike, tw_exposure, scenario)
     plot_df = pd.DataFrame(plot_cols).dropna(how='all')
     plot_df = plot_df.loc[(plot_df > 0).any(axis=1)]
     if plot_df.empty:
@@ -409,12 +431,12 @@ def plot_proxy_hedge_coverage(tw_result, us_result, date_index, final_portfolio_
     latest_t = float(tsm_px.dropna().iloc[-1])
     latest_q_contracts = float(qqq_contracts.iloc[-1])
     latest_t_contracts = float(tsm_contracts.iloc[-1])
-    qqq_current_put_value = _current_put_market_value('QQQ270115P00350000', latest_q_contracts)
-    tsm_current_put_value = _current_put_market_value('TSM270115P00200000', latest_t_contracts)
-    qqq_buy_date, qqq_buy_proxy_px = _put_entry_proxy_price(us_result, 'QQQ270115P00350000', qqq_px)
-    tsm_buy_date, tsm_buy_proxy_px = _put_entry_proxy_price(us_result, 'TSM270115P00200000', tsm_px)
-    qqq_entry_cost = _put_entry_cost(us_result, 'QQQ270115P00350000')
-    tsm_entry_cost = _put_entry_cost(us_result, 'TSM270115P00200000')
+    qqq_current_put_value = _current_put_market_value(qqq_put_symbol, latest_q_contracts)
+    tsm_current_put_value = _current_put_market_value(tsm_put_symbol, latest_t_contracts)
+    qqq_buy_date, qqq_buy_proxy_px = _put_entry_proxy_price(us_result, qqq_put_symbol, qqq_px)
+    tsm_buy_date, tsm_buy_proxy_px = _put_entry_proxy_price(us_result, tsm_put_symbol, tsm_px)
+    qqq_entry_cost = _put_entry_cost(us_result, qqq_put_symbol)
+    tsm_entry_cost = _put_entry_cost(us_result, tsm_put_symbol)
 
     def current_rate(proxy_px, strike, contracts, exposure, scenario):
         payout = max(strike - proxy_px * (1 + scenario), 0) * 100.0 * contracts
@@ -429,8 +451,8 @@ def plot_proxy_hedge_coverage(tw_result, us_result, date_index, final_portfolio_
     print(f'| :--- | :--- | ---: | {scenario_align} |')
     q_cost_rate = (qqq_premium / latest_us_exposure) * 100 if latest_us_exposure > 0 else np.nan
     t_cost_rate = (tsm_premium / latest_tw_exposure) * 100 if latest_tw_exposure > 0 else np.nan
-    q_rates = [current_rate(latest_q, 350.0, latest_q_contracts, latest_us_exposure, s) for s in scenarios]
-    t_rates = [current_rate(latest_t, 200.0, latest_t_contracts, latest_tw_exposure, s) for s in scenarios]
+    q_rates = [current_rate(latest_q, qqq_strike, latest_q_contracts, latest_us_exposure, s) for s in scenarios]
+    t_rates = [current_rate(latest_t, tsm_strike, latest_t_contracts, latest_tw_exposure, s) for s in scenarios]
     q_cells = ' | '.join(f'{rate:.1f}%' for rate in q_rates)
     t_cells = ' | '.join(f'{rate:.1f}%' for rate in t_rates)
     print(f"| QQQ Put | 美股風險曝險 | {q_cost_rate:.2f}% | {q_cells} |")
@@ -460,8 +482,8 @@ def plot_proxy_hedge_coverage(tw_result, us_result, date_index, final_portfolio_
     print('| :--- | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | :--- | :--- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |')
 
     reset_rows = [
-        ('QQQ Put', '美股風險曝險', 'QQQ270115P00350000', qqq_buy_date, qqq_buy_proxy_px, qqq_entry_cost, latest_q, latest_q_contracts, latest_us_exposure, q_rate_map, qqq_reset_expiry, qqq_current_put_value),
-        ('TSM Put', '台股風險曝險', 'TSM270115P00200000', tsm_buy_date, tsm_buy_proxy_px, tsm_entry_cost, latest_t, latest_t_contracts, latest_tw_exposure, t_rate_map, tsm_reset_expiry, tsm_current_put_value),
+        ('QQQ Put', '美股風險曝險', qqq_put_symbol, qqq_buy_date, qqq_buy_proxy_px, qqq_entry_cost, latest_q, latest_q_contracts, latest_us_exposure, q_rate_map, qqq_reset_expiry, qqq_current_put_value),
+        ('TSM Put', '台股風險曝險', tsm_put_symbol, tsm_buy_date, tsm_buy_proxy_px, tsm_entry_cost, latest_t, latest_t_contracts, latest_tw_exposure, t_rate_map, tsm_reset_expiry, tsm_current_put_value),
     ]
     for name, pool, put_symbol, buy_date, buy_proxy_px, entry_cost, proxy_px, contracts, exposure, rate_map, reset_expiry, current_put_value in reset_rows:
         current_status = f"-50% {rate_map[-0.50]:.1f}%，-90% {rate_map[-0.90]:.1f}%"

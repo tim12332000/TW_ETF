@@ -220,3 +220,10 @@ Date,Action,Symbol,Quantity,Price,Amount
 2026/6/16,Cash Dividend,SPYM,,,48.56
 2026/6/17,Journal,SPCX,-3,,
 2026/6/17,Journal,SPCX,3,,
+2026/6/23,NRA Tax Adj,UNH,,,-0.70
+2026/6/23,Qualified Dividend,UNH,,,2.32
+2026/6/30,NRA Tax Adj,QLD,,,-5.01
+2026/6/30,Cash Dividend,QLD,,,16.70
+2026/7/1,Buy,TSM270115P00220000,100,3.12,-312.66
+2026/7/1,Sell,TSM270115P00200000,-100,2.34,233.34
+2026/7/1,Sell,EDV,-1,$63.605,63.61
