@@ -565,6 +565,11 @@ def main():
 
     combined_external_cashflows = tw_result['external_cashflows'] + us_result['external_cashflows']
     combined_external_cashflows_twd = convert_cashflows_to_twd(combined_external_cashflows, usd_twd_series)
+    # The portfolio tracks securities only and does not retain an account cash
+    # balance. Treat every trade/dividend amount as an external flow so sales
+    # and subsequent purchases cannot create artificial TWR returns.
+    combined_transaction_cashflows = tw_result['transaction_cashflows'] + us_result['transaction_cashflows']
+    combined_transaction_cashflows_twd = convert_cashflows_to_twd(combined_transaction_cashflows, usd_twd_series)
     total_investment_us = tw_result['total_investment'] + us_result['total_investment']
     invested_capital_us = tw_result['invested_capital'] + us_result['invested_capital']
     final_portfolio_value_us = combined_portfolio_value_us.iloc[-1]
@@ -600,8 +605,8 @@ def main():
     daily_invested_capital_twd = (-daily_cf_twd).clip(lower=0)
 
     # --- 1-5. 風險指標：以 cashflow-neutral TWR 路徑計算 ---
-    twr_series = calculate_twr_series(combined_portfolio_value_us, combined_external_cashflows)
-    twr_series_twd = calculate_twr_series(combined_portfolio_value_twd, combined_external_cashflows_twd)
+    twr_series = calculate_twr_series(combined_portfolio_value_us, combined_transaction_cashflows)
+    twr_series_twd = calculate_twr_series(combined_portfolio_value_twd, combined_transaction_cashflows_twd)
     ann_vol_main, max_dd_main, sharpe_main, sortino_ratio, calmar_ratio = calc_risk_metrics_from_twr(
         twr_series,
         risk_free_rate=0.02
