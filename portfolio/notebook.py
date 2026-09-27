@@ -11,6 +11,7 @@ def generate_report():
     import portfolio.transactions
     import portfolio.performance
     import portfolio.benchmarking
+    import portfolio.report_summary
     import portfolio.positions
     import portfolio.reporting
     import portfolio.tw_portfolio
@@ -21,6 +22,7 @@ def generate_report():
     importlib.reload(portfolio.transactions)
     importlib.reload(portfolio.performance)
     importlib.reload(portfolio.benchmarking)
+    importlib.reload(portfolio.report_summary)
     importlib.reload(portfolio.positions)
     importlib.reload(portfolio.reporting)
     importlib.reload(portfolio.tw_portfolio)

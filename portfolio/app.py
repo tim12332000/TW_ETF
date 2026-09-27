@@ -6,6 +6,7 @@ import yfinance as yf
 import os
 import matplotlib.pyplot as plt
 from .transactions import build_combined_cash_ledger
+from .report_summary import render_summary_report
 
 from . import (
     DualLogger,
@@ -133,7 +134,7 @@ def build_symbol_value_history(result, date_index, price_data, fx_series=None):
     return values.clip(lower=0)
 
 
-def plot_monthly_asset_allocation(tw_result, us_result, date_index, usd_twd_series):
+def plot_monthly_asset_allocation(tw_result, us_result, date_index, usd_twd_series, cash_twd):
     tw_values = build_symbol_value_history(
         tw_result,
         date_index,
@@ -146,6 +147,7 @@ def plot_monthly_asset_allocation(tw_result, us_result, date_index, usd_twd_seri
         fx_series=usd_twd_series,
     )
     values = pd.concat([tw_values, us_values], axis=1).fillna(0)
+    values['Cash (inferred)'] = cash_twd.reindex(date_index).ffill().fillna(0)
     values = values.loc[:, values.max() > 0]
     if values.empty:
         return
@@ -159,9 +161,11 @@ def plot_monthly_asset_allocation(tw_result, us_result, date_index, usd_twd_seri
     major_symbols = max_alloc[max_alloc >= 1.0].index.tolist()
     if len(major_symbols) > 12:
         major_symbols = max_alloc.head(12).index.tolist()
+    if 'Cash (inferred)' not in major_symbols and 'Cash (inferred)' in daily_alloc:
+        major_symbols.append('Cash (inferred)')
     daily_alloc = daily_alloc[major_symbols].copy()
     other = 100 - daily_alloc.sum(axis=1)
-    if (other > 0.5).any():
+    if (other > 1e-8).any():
         daily_alloc['Other'] = other.clip(lower=0)
 
     fig, ax = plt.subplots(figsize=(14, 7))
@@ -170,10 +174,11 @@ def plot_monthly_asset_allocation(tw_result, us_result, date_index, usd_twd_seri
         daily_alloc.index,
         [daily_alloc[col].values for col in daily_alloc.columns],
         labels=daily_alloc.columns,
-        colors=colors[:len(daily_alloc.columns)],
+        colors=['#969696' if col == 'Cash (inferred)' else colors[i % len(colors)]
+                for i, col in enumerate(daily_alloc.columns)],
         alpha=0.9,
     )
-    ax.set_title('Daily Asset Allocation')
+    ax.set_title('Daily Asset Allocation (Including Cash)')
     ax.set_xlabel('Date')
     ax.set_ylabel('Allocation (%)')
     ax.set_ylim(0, 100)
@@ -712,7 +717,7 @@ def main():
 
     # --- 1-1. Logger 初始化 ---
     original_stdout = sys.stdout
-    sys.stdout = DualLogger('output/report.md')
+    sys.stdout = DualLogger('output/report_details.md')
 
     # --- 1-2. 匯率 + TW/US 原始資料 ---
     tw_result = process_tw_data()
@@ -1012,6 +1017,7 @@ def main():
     usd_metrics = [
         ("證券市值", f"{securities_value_us.iloc[-1]:,.2f} USD"),
         ("投組現金（推算）", f"{cash_twd.iloc[-1] / fx_daily.iloc[-1]:,.2f} USD"),
+        ("現金占總資產", f"{cash_twd.iloc[-1] / final_portfolio_value_twd:.2%}" if final_portfolio_value_twd > 0 else "N/A"),
         ("累積外部投入金額", f"{total_investment_us:,.2f} USD"),
         ("實際淨投入資金", f"{invested_capital_us:,.2f} USD"),
         ("最終組合市值", f"{final_portfolio_value_us:,.2f} USD"),
@@ -1031,6 +1037,7 @@ def main():
     twd_metrics = [
         ("證券市值", f"{securities_value_us.iloc[-1] * fx_daily.iloc[-1]:,.2f} TWD"),
         ("投組現金（推算）", f"{cash_twd.iloc[-1]:,.2f} TWD"),
+        ("現金占總資產", f"{cash_twd.iloc[-1] / final_portfolio_value_twd:.2%}" if final_portfolio_value_twd > 0 else "N/A"),
         ("累積外部投入金額", f"{total_investment_twd:,.2f} TWD"),
         ("實際淨投入資金", f"{invested_capital_twd:,.2f} TWD"),
         ("最終組合市值", f"{final_portfolio_value_twd:,.2f} TWD"),
@@ -1083,7 +1090,7 @@ def main():
     plt.close()
 
     # --- 3-1b. Monthly asset allocation ---
-    plot_monthly_asset_allocation(tw_result, us_result, date_index, usd_twd_series)
+    plot_monthly_asset_allocation(tw_result, us_result, date_index, usd_twd_series, cash_twd)
 
     # --- 3-2. Funding Ratio ---
     _den = daily_invested_capital_twd.replace(0, np.nan)
@@ -1130,6 +1137,20 @@ def main():
     plt.xlabel('日期'); plt.ylabel('市值 / 指數 (USD)')
     plt.legend(); plt.grid(True); plt.tight_layout()
     plt.savefig('output/portfolio_vs_benchmark_usd.png')
+    plt.close()
+    comparison_fx = align_fx_series(idx, usd_twd_series)
+    plt.figure(figsize=(11, 6))
+    plt.plot(my_us * comparison_fx, label='我的投組（含現金）', linewidth=2)
+    for tk, p in sims.items():
+        plt.plot(p * comparison_fx, label=tk)
+    plt.plot(daily_invested_capital_twd.reindex(idx).ffill(), label='累積投入', linestyle='--')
+    plt.title('同投入資產比較（TWD）')
+    plt.xlabel('日期')
+    plt.ylabel('總資產（台幣）')
+    plt.legend()
+    plt.grid(True)
+    plt.tight_layout()
+    plt.savefig('output/portfolio_vs_benchmark_twd.png')
     plt.show()
     plt.close()
 
@@ -1188,20 +1209,26 @@ def main():
         plt.close()
 
     # --- 3-6. 資產圓餅圖 ---
-    combined_df_chart = portfolio_df_combined.dropna(subset=['Price_Total'])
-    combined_df_chart = combined_df_chart[combined_df_chart['Price_Total'] > 0]
-    combined_df_chart['Price_Total'] = pd.to_numeric(combined_df_chart['Price_Total'], errors='coerce')
-    combined_df_chart['Price_Total_TWD'] = combined_df_chart['Price_Total'] * latest_usd_twd
-
-    total_pie_twd = combined_df_chart['Price_Total_TWD'].sum()
-    pie_labels = combined_df_chart.apply(
-        lambda row: f"{row['Name']} {row['Price_Total_TWD']/total_pie_twd*100:.1f}% ({row['Price_Total_TWD']:,.0f})", axis=1
-    )
-
-    plt.figure(figsize=(10, 8))
-    plt.pie(combined_df_chart['Price_Total_TWD'], labels=pie_labels, startangle=140)
-    plt.title('資產圓餅圖')
+    # Use the same historical valuation as the total-assets headline, rather
+    # than mixing independent live quotes from the position snapshot.
+    pie_values = pd.concat([
+        build_symbol_value_history(tw_result, date_index, tw_result['price_data_twd']).iloc[-1],
+        build_symbol_value_history(us_result, date_index, us_result['price_data'], usd_twd_series).iloc[-1],
+    ]).groupby(level=0).sum()
+    pie_values['現金（推算）'] = cash_twd.iloc[-1]
+    pie_values = pie_values[pie_values > 0].sort_values(ascending=False)
+    total_pie_twd = pie_values.sum()
+    pie_labels = [f'{symbol}  {value / total_pie_twd:.2%}  ({value:,.0f} 元)'
+                  for symbol, value in pie_values.items()]
+    palette = plt.get_cmap('tab20').colors
+    pie_colors = ['#969696' if symbol == '現金（推算）' else palette[i % len(palette)]
+                  for i, symbol in enumerate(pie_values.index)]
+    plt.figure(figsize=(12, 7))
+    wedges, _ = plt.pie(pie_values, colors=pie_colors, startangle=140)
+    plt.legend(wedges, pie_labels, loc='center left', bbox_to_anchor=(1, 0.5), frameon=False)
+    plt.title(f'資產配置（含現金）｜總資產 {total_pie_twd:,.0f} 元')
     plt.axis('equal')
+    plt.tight_layout()
     plt.savefig('output/asset_pie_chart.png')
     plt.show()
     plt.close()
@@ -1252,6 +1279,20 @@ def main():
     if isinstance(sys.stdout, DualLogger):
         sys.stdout.close()
     sys.stdout = original_stdout
+    put_rows = []
+    for symbol, value in pie_values.items():
+        meta = parse_occ_symbol(symbol)
+        if meta is not None and meta['option_type'] == 'P':
+            put_rows.append([meta['underlying'], meta['expiry'].strftime('%Y-%m-%d'),
+                             f"{meta['strike']:,.0f}", f'{value:,.0f}'])
+    report = render_summary_report(
+        invested=invested_capital_twd, total=final_portfolio_value_twd,
+        cash=cash_twd.iloc[-1], benchmark=bench_df, holdings=pie_values,
+        puts=put_rows, first_date=date_index.min().strftime('%Y-%m-%d'),
+        last_date=date_index.max().strftime('%Y-%m-%d'),
+    )
+    with open('output/report.md', 'w', encoding='utf-8') as report_file:
+        report_file.write(report)
 
 
 if __name__ == '__main__':

@@ -34,6 +34,8 @@ A local portfolio analysis project for combined TW and US holdings.
 
 Generated files are written to `output/`.
 The main text report is written to `output/report.md`.
+The compact report uses TWD and five core charts. Full position PnL,
+USD metrics, rebalance and hedge scenarios are in `output/report_details.md`.
 Cached market data is written to `cache/`.
 
 ## Current Design Goal
