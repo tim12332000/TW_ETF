@@ -1,4 +1,34 @@
 import pandas as pd
+import numpy as np
+
+
+def build_combined_cash_ledger(tw_df, us_df, date_index, fx_series):
+    """Net both markets daily in TWD, retain cash and infer only funding deficits."""
+    parts = []
+    for frame, column, is_us in [(tw_df, 'Amount_TWD', False), (us_df, 'Amount', True)]:
+        rows = frame[['Date', column]].copy()
+        rows['Date'] = pd.to_datetime(rows['Date']).dt.normalize()
+        amounts = pd.to_numeric(rows[column], errors='raise').fillna(0).to_numpy(dtype=float)
+        if not np.isfinite(amounts).all():
+            raise ValueError('Transaction amounts must be finite')
+        if is_us and len(rows):
+            rates = fx_series.sort_index().reindex(pd.DatetimeIndex(rows['Date']), method='ffill').to_numpy(dtype=float)
+            if not (np.isfinite(rates) & (rates > 0)).all():
+                raise ValueError('Missing or invalid historical FX for USD transactions')
+            amounts = amounts * rates
+        parts.append(pd.Series(amounts, index=pd.DatetimeIndex(rows['Date']), dtype=float))
+    flows = pd.concat(parts).groupby(level=0).sum()
+    index = pd.DatetimeIndex(date_index).union(flows.index).sort_values()
+    net = flows.reindex(index, fill_value=0.0)
+    cumulative = net.cumsum()
+    invested = (-cumulative.cummin()).clip(lower=0)
+    external = -invested.diff().fillna(invested)
+    return pd.DataFrame({
+        'transaction_net_twd': net,
+        'external_flow_twd': external,
+        'cash_twd': (cumulative + invested).clip(lower=0),
+        'invested_twd': invested,
+    }, index=index)
 
 
 def clean_currency(x):

@@ -5,11 +5,13 @@ import numpy as np
 import yfinance as yf
 import os
 import matplotlib.pyplot as plt
+from .transactions import build_combined_cash_ledger
 
 from . import (
     DualLogger,
     align_fx_series,
     analyze_put_protection,
+    black_scholes_put,
     build_cash_ledgers,
     build_option_history_series,
     calc_risk_metrics_from_twr,
@@ -26,6 +28,8 @@ from . import (
     get_latest_available_price,
     get_twd_to_usd_rate,
     get_usd_twd_history,
+    implied_volatility_for_put,
+    parse_occ_symbol,
     plot_stock_performance,
     print_rebalance_recommendation,
     process_tw_portfolio,
@@ -56,6 +60,8 @@ REPORT_CHARTS = [
     ('Asset Pie Chart', 'asset_pie_chart.png'),
     ('Monthly Investment', 'monthly_investment.png'),
     ('Stock Performance', 'stock_performance.png'),
+    ('Put Position Value History', 'put_position_history.png'),
+    ('Put vs Stock Hedge Effect', 'put_stock_hedge_effect.png'),
     ('代理避險情境保護率', 'proxy_hedge_coverage.png'),
     ('Put 避險保護全投組壓力測試', 'total_asset_protection.png'),
 ]
@@ -367,6 +373,165 @@ def _current_put_market_value(put_symbol, contracts):
     return float(price or 0) * 100.0 * contracts
 
 
+def plot_put_position_history(us_result, date_index):
+    """Plot model-estimated value history for every OCC put ever held."""
+    df = us_result['df'].copy()
+    df['Date'] = pd.to_datetime(df['Date']).dt.normalize()
+    df['Quantity'] = pd.to_numeric(df['Quantity'], errors='coerce').fillna(0.0)
+    df['Amount'] = pd.to_numeric(df['Amount'], errors='coerce')
+
+    is_put = df['Symbol'].astype(str).map(lambda symbol: parse_occ_symbol(symbol) is not None)
+    put_rows = df.loc[is_put].copy()
+    put_symbols = sorted(put_rows.loc[put_rows['Quantity'] > 0, 'Symbol'].unique())
+    if not put_symbols:
+        return
+
+    model_values = {}
+    cost_values = {}
+    actual_values = {}
+    exit_values = {}
+    colors = plt.get_cmap('tab10').colors
+
+    for symbol in put_symbols:
+        meta = parse_occ_symbol(symbol)
+        rows = put_rows.loc[put_rows['Symbol'] == symbol].sort_values('Date')
+        buys = rows.loc[(rows['Quantity'] > 0) & (rows['Amount'] < 0)]
+        if buys.empty:
+            continue
+
+        entry_date = pd.Timestamp(buys.iloc[0]['Date']).normalize()
+        history_index = date_index[(date_index >= entry_date) & (date_index <= meta['expiry'])]
+        if history_index.empty:
+            continue
+
+        underlying = meta['underlying']
+        underlying_px = get_daily_price(
+            underlying, history_index.min(), history_index.max() + pd.Timedelta(days=1), is_tw=False
+        )
+        if isinstance(underlying_px, pd.DataFrame):
+            underlying_px = underlying_px[underlying] if underlying in underlying_px.columns else underlying_px.iloc[:, 0]
+        underlying_px = pd.Series(underlying_px, dtype=float)
+        if hasattr(underlying_px.index, 'tz') and underlying_px.index.tz is not None:
+            underlying_px.index = underlying_px.index.tz_localize(None)
+        underlying_px.index = pd.to_datetime(underlying_px.index).normalize()
+        underlying_px = underlying_px.reindex(history_index).ffill().bfill()
+        if underlying_px.dropna().empty:
+            continue
+
+        quantity = rows.groupby('Date')['Quantity'].sum().reindex(history_index, fill_value=0.0).cumsum().clip(lower=0.0)
+        entry_quantity = float(buys['Quantity'].sum())
+        entry_premium_per_share = float(-buys['Amount'].sum()) / entry_quantity
+        entry_years = max((meta['expiry'] - entry_date).days / 365.0, 1 / 365.0)
+        entry_iv = implied_volatility_for_put(
+            entry_premium_per_share, float(underlying_px.iloc[0]), meta['strike'], entry_years
+        )
+        if pd.isna(entry_iv):
+            entry_iv = 0.40
+
+        model_price = []
+        for dt, spot in underlying_px.items():
+            years = max((meta['expiry'] - dt).days / 365.0, 1 / 365.0)
+            model_price.append(black_scholes_put(float(spot), meta['strike'], years, 0.045, entry_iv))
+        position_value = pd.Series(model_price, index=history_index) * quantity
+        model_values[symbol] = position_value.where(quantity > 0)
+
+        cash_cost = (-rows.set_index('Date')['Amount']).groupby(level=0).sum()
+        cost_values[symbol] = cash_cost.reindex(history_index, fill_value=0.0).cumsum()
+        final_quantity = float(quantity.iloc[-1])
+        if final_quantity > 0:
+            actual_values[symbol] = _current_put_market_value(symbol, final_quantity / 100.0)
+        else:
+            sells = rows.loc[(rows['Quantity'] < 0) & (rows['Amount'] > 0)]
+            if not sells.empty:
+                exit_values[symbol] = (
+                    pd.Timestamp(sells.iloc[-1]['Date']).normalize(),
+                    float(sells['Amount'].sum()),
+                )
+
+    if not model_values:
+        return
+
+    model_df = pd.DataFrame(model_values)
+    cost_df = pd.DataFrame(cost_values).reindex(model_df.index).ffill().fillna(0.0)
+    total_model = model_df.fillna(0.0).sum(axis=1)
+    total_cost = cost_df.sum(axis=1)
+    total_actual = sum(value for value in actual_values.values() if pd.notna(value))
+
+    fig, (ax_positions, ax_total) = plt.subplots(2, 1, figsize=(14, 9), sharex=True)
+    for idx, symbol in enumerate(model_df.columns):
+        color = colors[idx % len(colors)]
+        meta = parse_occ_symbol(symbol)
+        label = f"{meta['underlying']} {meta['expiry']:%Y-%m-%d} {meta['strike']:.0f}P"
+        ax_positions.plot(model_df.index, model_df[symbol], color=color, linewidth=2, label=f'{label} 模型估值')
+        actual = actual_values.get(symbol)
+        if actual is not None and pd.notna(actual):
+            current_model = float(model_df[symbol].dropna().iloc[-1])
+            model_gap = actual - current_model
+            ax_positions.scatter(
+                model_df.index[-1], actual, color=color, marker='X', s=90, zorder=5,
+                label=f'{label} 目前實價 ${actual:,.0f}',
+            )
+            ax_positions.annotate(
+                f'實價－模型 {model_gap:+,.0f}',
+                xy=(model_df.index[-1], actual),
+                xytext=(-115, 18 + idx * 18),
+                textcoords='offset points',
+                arrowprops={'arrowstyle': '->', 'color': color},
+                fontsize=9,
+                color=color,
+                fontweight='bold',
+            )
+        exit_info = exit_values.get(symbol)
+        if exit_info is not None:
+            exit_date, exit_proceeds = exit_info
+            ax_positions.scatter(
+                exit_date, exit_proceeds, color=color, marker='o', s=75, zorder=5,
+                edgecolor='white', linewidth=1.2, label=f'{label} 已平倉 ${exit_proceeds:,.0f}',
+            )
+            ax_positions.annotate(
+                f'7/1 平倉實收 ${exit_proceeds:,.0f}',
+                xy=(exit_date, exit_proceeds), xytext=(-145, 28), textcoords='offset points',
+                arrowprops={'arrowstyle': '->', 'color': color}, fontsize=9, color=color,
+                fontweight='bold',
+            )
+    ax_positions.set_title('全部 Put：持有期間估值、平倉點與目前實價')
+    ax_positions.set_ylabel('持倉價值 (USD)')
+    ax_positions.grid(True, alpha=0.25)
+    ax_positions.legend(loc='upper left', fontsize=9)
+
+    ax_total.plot(total_model.index, total_model, color='#7b1fa2', linewidth=2.5, label='Put 合計模型估值')
+    ax_total.plot(total_cost.index, total_cost, color='#ef6c00', linewidth=2, linestyle='--', label='全部 Put 累積淨投入')
+    ax_total.scatter(
+        total_model.index[-1], total_actual, color='#1565c0', marker='X', s=110, zorder=5,
+        label=f'目前實際市值 ${total_actual:,.0f}',
+    )
+    current_cost = float(total_cost.iloc[-1])
+    current_pnl = total_actual - current_cost
+    pnl_pct = current_pnl / current_cost * 100 if current_cost else np.nan
+    ax_total.annotate(
+        f'Put 策略累計損益 ${current_pnl:,.0f} ({pnl_pct:+.1f}%)',
+        xy=(total_model.index[-1], total_actual), xytext=(-210, 25), textcoords='offset points',
+        arrowprops={'arrowstyle': '->', 'color': '#1565c0'}, fontsize=10, fontweight='bold',
+    )
+    ax_total.set_title('全部 Put 合計價值與累積淨投入')
+    ax_total.set_xlabel('日期')
+    ax_total.set_ylabel('價值 (USD)')
+    ax_total.grid(True, alpha=0.25)
+    ax_total.legend(loc='upper left', fontsize=9)
+
+    fig.suptitle('我的全部 Put 持倉走勢', fontsize=16, fontweight='bold')
+    fig.text(
+        0.5, 0.01,
+        '歷史曲線為 Black-Scholes 模型估值（以買入價反推進場 IV）；X 為目前實際市價，不代表歷史真實報價。',
+        ha='center', fontsize=9, color='#555555',
+    )
+    plt.tight_layout(rect=[0, 0.04, 1, 0.96])
+    plt.savefig('output/put_position_history.png', dpi=160)
+    plt.show()
+    plt.close()
+    print('圖表已儲存至 output/put_position_history.png')
+
+
 def plot_proxy_hedge_coverage(tw_result, us_result, date_index, final_portfolio_value_us, invested_capital_us):
     us_values = build_symbol_value_history(us_result, date_index, us_result['price_data'])
     tw_values = build_symbol_value_history(tw_result, date_index, tw_result['price_data'])
@@ -561,17 +726,21 @@ def main():
     usd_to_twd = latest_usd_twd
     portfolio_value_tw = tw_result['portfolio_value'].reindex(date_index, method='ffill').fillna(0)
     portfolio_value_us = us_result['portfolio_value'].reindex(date_index, method='ffill').fillna(0)
-    combined_portfolio_value_us = portfolio_value_tw + portfolio_value_us
-
-    combined_external_cashflows = tw_result['external_cashflows'] + us_result['external_cashflows']
-    combined_external_cashflows_twd = convert_cashflows_to_twd(combined_external_cashflows, usd_twd_series)
-    # The portfolio tracks securities only and does not retain an account cash
-    # balance. Treat every trade/dividend amount as an external flow so sales
-    # and subsequent purchases cannot create artificial TWR returns.
-    combined_transaction_cashflows = tw_result['transaction_cashflows'] + us_result['transaction_cashflows']
-    combined_transaction_cashflows_twd = convert_cashflows_to_twd(combined_transaction_cashflows, usd_twd_series)
-    total_investment_us = tw_result['total_investment'] + us_result['total_investment']
-    invested_capital_us = tw_result['invested_capital'] + us_result['invested_capital']
+    securities_value_us = portfolio_value_tw + portfolio_value_us
+    cash_ledger = build_combined_cash_ledger(
+        tw_result['df'], us_result['cash_transactions'], date_index, usd_twd_series
+    )
+    date_index = cash_ledger.index
+    fx_daily = usd_twd_series.reindex(date_index, method='ffill')
+    securities_value_us = securities_value_us.reindex(date_index).ffill().fillna(0)
+    cash_twd = cash_ledger['cash_twd']
+    combined_portfolio_value_us = securities_value_us + cash_twd / fx_daily
+    external_twd = cash_ledger['external_flow_twd']
+    external_twd = external_twd[external_twd < 0]
+    combined_external_cashflows_twd = list(external_twd.items())
+    combined_external_cashflows = list((external_twd / fx_daily.reindex(external_twd.index)).items())
+    total_investment_us = -sum(amount for _, amount in combined_external_cashflows)
+    invested_capital_us = total_investment_us
     final_portfolio_value_us = combined_portfolio_value_us.iloc[-1]
     total_profit_us = final_portfolio_value_us - invested_capital_us
     total_profit_pct_us = (total_profit_us / invested_capital_us) * 100 if invested_capital_us != 0 else 0
@@ -583,10 +752,11 @@ def main():
     final_portfolio_value_twd = combined_portfolio_value_twd.iloc[-1]
     total_profit_twd = final_portfolio_value_twd - invested_capital_twd
     total_profit_pct_twd = (total_profit_twd / invested_capital_twd) * 100 if invested_capital_twd != 0 else 0
+    cash_ledger['securities_twd'] = securities_value_us * fx_daily
+    cash_ledger['total_assets_twd'] = combined_portfolio_value_twd
+    cash_ledger.to_csv('output/combined_cash_ledger.csv', encoding='utf-8-sig', index_label='Date')
 
-    # --- 1-4. transactions_df + 累積投入資金線（提前建立，後續多張圖需要） ---
-    transactions_df = pd.concat([tw_result['df'], us_result['df']])
-    transactions_df['Date'] = pd.to_datetime(transactions_df['Date']).dt.normalize()
+    # --- 1-4. 合併外部投入資金線 ---
     cf_df = pd.DataFrame(combined_external_cashflows, columns=['Date', 'Amount']).sort_values('Date')
     if cf_df.empty:
         cf_df = pd.DataFrame({'Date': date_index, 'Amount': 0.0})
@@ -605,8 +775,8 @@ def main():
     daily_invested_capital_twd = (-daily_cf_twd).clip(lower=0)
 
     # --- 1-5. 風險指標：以 cashflow-neutral TWR 路徑計算 ---
-    twr_series = calculate_twr_series(combined_portfolio_value_us, combined_transaction_cashflows)
-    twr_series_twd = calculate_twr_series(combined_portfolio_value_twd, combined_transaction_cashflows_twd)
+    twr_series = calculate_twr_series(combined_portfolio_value_us, combined_external_cashflows)
+    twr_series_twd = calculate_twr_series(combined_portfolio_value_twd, combined_external_cashflows_twd)
     ann_vol_main, max_dd_main, sharpe_main, sortino_ratio, calmar_ratio = calc_risk_metrics_from_twr(
         twr_series,
         risk_free_rate=0.02
@@ -617,7 +787,7 @@ def main():
     )
 
     # --- 1-6. XIRR ---
-    total_snapshot = tw_result['portfolio_snapshot'] + us_result['portfolio_snapshot']
+    total_snapshot = final_portfolio_value_us
     xirr_cashflows = combined_external_cashflows + [(pd.Timestamp.today(), total_snapshot)]
     combined_irr = None
     try:
@@ -755,8 +925,8 @@ def main():
 
     # --- 1-10. Benchmark 對照表計算 ---
     today = pd.Timestamp.today().normalize()
-    base_cf = [(d, amt) for (d, amt) in combined_external_cashflows if d < today]
-    base_cf_twd = [(d, amt) for (d, amt) in combined_external_cashflows_twd if d < today]
+    base_cf = [(d, amt) for (d, amt) in combined_external_cashflows if d <= today]
+    base_cf_twd = [(d, amt) for (d, amt) in combined_external_cashflows_twd if d <= today]
 
     def last_valid(series):
         return series.dropna().iloc[-1] if series.dropna().size else np.nan
@@ -840,6 +1010,8 @@ def main():
 
     # --- 2-1. 綜合資產報告 (USD) ---
     usd_metrics = [
+        ("證券市值", f"{securities_value_us.iloc[-1]:,.2f} USD"),
+        ("投組現金（推算）", f"{cash_twd.iloc[-1] / fx_daily.iloc[-1]:,.2f} USD"),
         ("累積外部投入金額", f"{total_investment_us:,.2f} USD"),
         ("實際淨投入資金", f"{invested_capital_us:,.2f} USD"),
         ("最終組合市值", f"{final_portfolio_value_us:,.2f} USD"),
@@ -857,6 +1029,8 @@ def main():
 
     # --- 2-2. 綜合資產報告 (TWD) ---
     twd_metrics = [
+        ("證券市值", f"{securities_value_us.iloc[-1] * fx_daily.iloc[-1]:,.2f} TWD"),
+        ("投組現金（推算）", f"{cash_twd.iloc[-1]:,.2f} TWD"),
         ("累積外部投入金額", f"{total_investment_twd:,.2f} TWD"),
         ("實際淨投入資金", f"{invested_capital_twd:,.2f} TWD"),
         ("最終組合市值", f"{final_portfolio_value_twd:,.2f} TWD"),
@@ -871,6 +1045,8 @@ def main():
     if combined_irr_twd is not None:
         twd_metrics.append(("綜合 XIRR", color_signed(combined_irr_twd, f"{combined_irr_twd:.2%}")))
     print_metric_list("綜合資產配置報告 (單位: TWD)", twd_metrics)
+    print("\n現金與投入依台美合併交易推算：同日淨額結算、先用現金再補投入；未記錄提款，現金以台幣記帳且不計息。總資產含現金。")
+    print("Benchmark 使用相同外部投入並全額投資；調整價格含股息再投入，未扣個人股息稅與交易費。持股明細占比以證券市值為分母。")
 
     # --- 2-3. 個股明細表 ---
     print("\n## 綜合投資組合股票明細 (TWD)")
@@ -958,7 +1134,7 @@ def main():
     plt.close()
 
     # --- 3-5. Drawdown 水下圖 ---
-    wealth_index = combined_portfolio_value_twd / invested_capital_twd if invested_capital_twd != 0 else combined_portfolio_value_twd * np.nan
+    wealth_index = 1 + twr_series_twd / 100.0
     running_max_dd = wealth_index.cummax()
     drawdown = (wealth_index - running_max_dd) / running_max_dd
 
@@ -1031,8 +1207,7 @@ def main():
     plt.close()
 
     # --- 3-7. 每月投入資產 ---
-    daily_net = transactions_df.groupby('Date')['Amount'].sum()
-    daily_injection = daily_net[daily_net < 0].abs()
+    daily_injection = pd.Series(dict(combined_external_cashflows), dtype=float).abs()
     monthly_investment = daily_injection.groupby(daily_injection.index.to_period('M')).sum()
     monthly_investment.index = monthly_investment.index.to_timestamp()
 
@@ -1049,6 +1224,7 @@ def main():
 
     # --- 3-8. 個股績效 (TWR) ---
     plot_stock_performance(tw_result, us_result)
+    plot_put_position_history(us_result, date_index)
 
     # --- 3-8b. Proxy Put 覆蓋率 ---
     plot_proxy_hedge_coverage(

@@ -16,7 +16,13 @@ from .market_data import (
 )
 from .performance import calc_risk_metrics_from_twr, calculate_twr_series, twr_to_daily_returns, xirr, xnpv
 from .positions import calculate_total_pnl_for_closed_position
-from .reporting import analyze_put_protection, black_scholes_put, plot_stock_performance, print_rebalance_recommendation
+from .reporting import (
+    analyze_put_protection,
+    black_scholes_put,
+    implied_volatility_for_put,
+    plot_stock_performance,
+    print_rebalance_recommendation,
+)
 from .transactions import build_cash_ledgers, clean_currency, convert_ticker, fix_share_sign
 from .tw_portfolio import process_tw_data
 from .us_portfolio import process_us_data

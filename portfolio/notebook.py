@@ -8,17 +8,25 @@ from pathlib import Path
 def generate_report():
     """Generate the portfolio report from a live notebook kernel."""
     import portfolio
-    import portfolio.app
+    import portfolio.transactions
+    import portfolio.performance
+    import portfolio.benchmarking
     import portfolio.positions
     import portfolio.reporting
     import portfolio.tw_portfolio
     import portfolio.us_portfolio
 
+    # Refresh dependencies before importing/reloading app: a live kernel may
+    # still have transactions from before a newly added function existed.
+    importlib.reload(portfolio.transactions)
+    importlib.reload(portfolio.performance)
+    importlib.reload(portfolio.benchmarking)
     importlib.reload(portfolio.positions)
     importlib.reload(portfolio.reporting)
     importlib.reload(portfolio.tw_portfolio)
     importlib.reload(portfolio.us_portfolio)
     importlib.reload(portfolio)
+    import portfolio.app
     importlib.reload(portfolio.app)
 
     portfolio.app.plt.show = lambda *args, **kwargs: None

@@ -6,6 +6,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 from matplotlib import rcParams
+from scipy.optimize import brentq
 from scipy.stats import norm
 from tabulate import tabulate
 
@@ -162,6 +163,43 @@ def black_scholes_put(S, K, T, r, sigma):
     d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
     d2 = d1 - sigma * np.sqrt(T)
     return K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
+
+
+def implied_volatility_for_put(market_price, S, K, T, r=0.045):
+    """Return the Black-Scholes IV matching a put price, or NaN when unsolvable."""
+    if market_price <= 0 or S <= 0 or K <= 0 or T <= 0:
+        return np.nan
+
+    objective = lambda sigma: black_scholes_put(S, K, T, r, sigma) - market_price
+    try:
+        return float(brentq(objective, 0.01, 5.0))
+    except (ValueError, RuntimeError):
+        return np.nan
+
+
+def estimate_put_scenario_value(put_info, underlying_return, today=None, risk_free_rate=0.045):
+    """Revalue a put under a price shock while anchoring the curve to its market value."""
+    today = pd.Timestamp(today or datetime.now()).normalize()
+    expiry = pd.Timestamp(put_info['expiry']).normalize()
+    if expiry <= today:
+        return 0.0
+
+    years_to_expiry = (expiry - today).days / 365.0
+    base_volatility = 0.20
+    stressed_volatility = base_volatility + max(-underlying_return, 0.0) * 0.8
+    current_model_value = black_scholes_put(
+        put_info['s0'], put_info['strike'], years_to_expiry, risk_free_rate, base_volatility
+    )
+    stressed_model_value = black_scholes_put(
+        max(put_info['s0'] * (1 + underlying_return), 0.0),
+        put_info['strike'],
+        years_to_expiry,
+        risk_free_rate,
+        stressed_volatility,
+    )
+    contract_multiplier = 100.0 * put_info['contracts']
+    model_change = (stressed_model_value - current_model_value) * contract_multiplier
+    return max(float(put_info['market_value']) + model_change, 0.0)
 
 
 def analyze_put_protection(portfolio_df):
@@ -371,3 +409,80 @@ def analyze_put_protection(portfolio_df):
     plt.show()
     plt.close()
     print('圖表已儲存至 output/total_asset_protection.png')
+
+    hedge_drops = np.linspace(-0.90, 0.20, 221)
+    stock_pnl = []
+    put_pnl = []
+    for drop in hedge_drops:
+        stressed_non_put_value = sum(
+            pos['value'] * (1 + stress_assumption(pos['sym'], drop)[0])
+            for pos in non_put_positions
+        )
+        stressed_put_value = sum(
+            estimate_put_scenario_value(put_info, drop, today=today, risk_free_rate=r)
+            for put_info in puts_info
+        )
+        stock_pnl.append(stressed_non_put_value - base_non_put_value)
+        put_pnl.append(stressed_put_value - current_put_market_value)
+
+    stock_pnl = np.asarray(stock_pnl)
+    put_pnl = np.asarray(put_pnl)
+    hedged_pnl = stock_pnl + put_pnl
+    downside_mask = stock_pnl < 0
+    coverage = np.zeros_like(stock_pnl)
+    coverage[downside_mask] = np.maximum(put_pnl[downside_mask], 0) / -stock_pnl[downside_mask] * 100
+
+    key_drops = np.array([-0.30, -0.50, -0.70, -0.90])
+    key_indices = [int(np.argmin(np.abs(hedge_drops - drop))) for drop in key_drops]
+    key_coverage = coverage[key_indices]
+
+    fig, (ax_pnl, ax_coverage) = plt.subplots(
+        1, 2, figsize=(14, 6), gridspec_kw={'width_ratios': [1.7, 1]}
+    )
+    x_pct = hedge_drops * 100
+    ax_pnl.plot(x_pct, stock_pnl, color='#d93025', linewidth=2.2, label='現股／非 Put 持倉損益')
+    ax_pnl.plot(x_pct, put_pnl, color='#7b1fa2', linewidth=2.2, linestyle='--', label='Put 損益')
+    ax_pnl.plot(x_pct, hedged_pnl, color='#1565c0', linewidth=2.8, label='合併後損益')
+    ax_pnl.fill_between(x_pct, stock_pnl, hedged_pnl, where=put_pnl > 0, color='#34a853', alpha=0.16)
+    ax_pnl.axhline(0, color='#444444', linewidth=1)
+    ax_pnl.axvline(0, color='#888888', linewidth=1, linestyle=':')
+    ax_pnl.set_title('損益曲線：Put 是否抵銷現股下跌')
+    ax_pnl.set_xlabel('基準市場情境 (%)')
+    ax_pnl.set_ylabel('相對今日損益 (USD)')
+    ax_pnl.grid(True, alpha=0.25)
+    ax_pnl.legend(loc='upper left')
+
+    bars = ax_coverage.bar(
+        [f'{drop:.0%}' for drop in key_drops], key_coverage, color='#34a853', alpha=0.85
+    )
+    ax_coverage.axhline(100, color='#1565c0', linestyle=':', linewidth=1.5, label='完全對沖 100%')
+    ax_coverage.set_title('下跌情境的虧損覆蓋率')
+    ax_coverage.set_xlabel('基準市場情境')
+    ax_coverage.set_ylabel('Put 獲利 ÷ 現股虧損 (%)')
+    ax_coverage.grid(True, axis='y', alpha=0.25)
+    ax_coverage.legend(loc='upper left')
+    for bar, value in zip(bars, key_coverage):
+        ax_coverage.text(
+            bar.get_x() + bar.get_width() / 2,
+            bar.get_height(),
+            f'{value:.1f}%',
+            ha='center',
+            va='bottom',
+            fontsize=10,
+            fontweight='bold',
+        )
+
+    fig.suptitle('Put 對現股／非 Put 持倉的對沖效果', fontsize=15, fontweight='bold')
+    fig.text(
+        0.5,
+        0.01,
+        '情境估值採 Black-Scholes，並假設市場下跌時隱含波動率上升；結果不是到期損益保證。',
+        ha='center',
+        fontsize=9,
+        color='#555555',
+    )
+    plt.tight_layout(rect=[0, 0.04, 1, 0.94])
+    plt.savefig('output/put_stock_hedge_effect.png', dpi=160)
+    plt.show()
+    plt.close()
+    print('圖表已儲存至 output/put_stock_hedge_effect.png')

@@ -273,6 +273,9 @@ def process_us_data(
     df_us = df_us.apply(fix_share_sign, axis=1)
     df_us["Quantity"] = pd.to_numeric(df_us["Quantity"], errors="coerce")
     df_us["Amount"] = df_us["Amount"].apply(clean_currency)
+    # Share normalization may discard journal/split rows; retain any cash they
+    # carry for the combined cash ledger independently of position quantities.
+    cash_transactions = df_us[['Date', 'Amount']].copy()
     df_us = _normalize_us_quantities_to_split_adjusted_basis(df_us)
 
     transaction_cashflows_us, external_cashflows_us, invested_capital_us = build_cash_ledgers(df_us)
@@ -366,6 +369,7 @@ def process_us_data(
 
     return {
         "df": df_us,
+        "cash_transactions": cash_transactions,
         "date_range": date_range,
         "portfolio_value": portfolio_value_us,
         "transaction_cashflows": transaction_cashflows_us,
