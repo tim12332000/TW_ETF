@@ -2,6 +2,7 @@ from pathlib import Path
 import sys
 
 ROOT = Path(__file__).resolve().parents[1]
+TRANSACTION_DIR = ROOT / "data" / "transactions"
 if str(ROOT) not in sys.path:
     sys.path.insert(0, str(ROOT))
 
@@ -34,7 +35,7 @@ def test_us_journal_rows_do_not_poison_position_costs():
     assert round(spcx["Price_Total"], 2) == 600.00
     # Cash-bearing journal rows must survive even if removed from share history.
     cash = result['cash_transactions']
-    raw = pd.read_csv(ROOT / 'us_train.csv', encoding='utf-8-sig')
+    raw = pd.read_csv(TRANSACTION_DIR / 'us_train.csv', encoding='utf-8-sig')
     raw['Date'] = pd.to_datetime(raw['Date'])
     expected = raw['Amount'].apply(clean_currency).groupby(raw['Date']).sum()
     actual = cash.groupby('Date')['Amount'].sum()
@@ -42,7 +43,7 @@ def test_us_journal_rows_do_not_poison_position_costs():
 
 
 def test_open_position_pnl_percent_uses_total_buy_denominator():
-    df = pd.read_csv(ROOT / "us_train.csv", encoding="utf-8-sig")
+    df = pd.read_csv(TRANSACTION_DIR / "us_train.csv", encoding="utf-8-sig")
     df["Date"] = pd.to_datetime(df["Date"])
     # This regression covers the remaining share before the July liquidation.
     df = df.loc[df['Date'] < '2026-07-01'].copy()
@@ -62,15 +63,17 @@ def test_open_position_pnl_percent_uses_total_buy_denominator():
 
 
 def test_us_dividends_are_grouped_by_symbol():
-    df = pd.read_csv(ROOT / "us_train.csv", encoding="utf-8-sig")
+    df = pd.read_csv(TRANSACTION_DIR / "us_train.csv", encoding="utf-8-sig")
     df["Amount"] = df["Amount"].apply(clean_currency)
 
-    assert round(calculate_dividends_for_position("EDV", df), 2) == 393.48
+    assert round(calculate_dividends_for_position("EDV", df), 2) == 394.35
     assert round(calculate_dividends_for_position("TQQQ", df), 2) == 138.50
+    assert round(calculate_dividends_for_position("SPYM", df), 2) == 234.52
+    assert round(calculate_dividends_for_position("QLD", df), 2) == 54.40
 
 
 def test_tw_cash_dividends_are_grouped_by_symbol():
-    df = pd.read_csv(ROOT / "tw_train.csv", encoding="utf-8-sig")
+    df = pd.read_csv(TRANSACTION_DIR / "tw_train.csv", encoding="utf-8-sig")
     # Freeze the original fixture period so subsequent dividends do not alter it.
     df = df.loc[pd.to_datetime(df.iloc[:, 0]) < '2026-08-10'].copy()
     df = df.rename(

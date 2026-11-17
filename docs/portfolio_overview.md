@@ -4,8 +4,13 @@ This project reads TW and US transaction exports, normalizes cashflows and holdi
 
 ## Main entry points
 
+- `startup.ipynb`: daily notebook entry point
 - `portfolio_report.py`: thin script entry point
 - `portfolio/app.py`: orchestration for loading data, building reports, and rendering charts
+
+Active transactions are `data/transactions/tw_train.csv` and
+`data/transactions/us_train.csv`. Historical imports and price snapshots live in
+`data/imports/` and `data/reference/` and are not selected by the report pipeline.
 
 ## Core modules
 
@@ -21,15 +26,13 @@ This project reads TW and US transaction exports, normalizes cashflows and holdi
 
 ## Outputs
 
-Generated artifacts are written under `output/`, including:
+The current reports are `output/report.md` and `output/report_details.md`.
+Their 19 figures are in `output/charts/`; the shared daily cash ledger is
+`output/combined_cash_ledger.csv`.
 
-- `report.txt`
-- `asset_trend.png`
-- `funding_ratio.png`
-- `cumulative_return_comparison.png`
-- `portfolio_vs_benchmark_usd.png`
-- `drawdown_underwater.png`
-- `asset_pie_chart.png`
-- `monthly_investment.png`
-- `stock_performance.png`
-- `total_asset_protection.png`
+Research artifacts live in `output/research/` by topic. Old validation files
+live in `output/diagnostics/`, spreadsheet exports in `output/exports/`, and
+the historical text report in `output/archive/report.txt`.
+
+See [the complete folder map](project_layout.md) for research, tools, historical
+inputs and cache locations.

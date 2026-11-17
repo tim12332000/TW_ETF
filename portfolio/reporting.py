@@ -1,5 +1,6 @@
 import re
 from datetime import datetime
+from pathlib import Path
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -9,10 +10,17 @@ from matplotlib import rcParams
 from scipy.optimize import brentq
 from scipy.stats import norm
 from tabulate import tabulate
+from .cache import get_cached_data
 
 
 rcParams['font.sans-serif'] = ['Microsoft YaHei']
 rcParams['axes.unicode_minus'] = False
+
+
+def save_report_chart(path, **kwargs):
+    # pyplot.savefig triggers a second Agg draw after saving the same figure.
+    Path(path).parent.mkdir(parents=True, exist_ok=True)
+    plt.gcf().savefig(path, pil_kwargs={'compress_level': 1}, **kwargs)
 
 
 def color_signed(value, text):
@@ -36,10 +44,10 @@ def plot_stock_performance(tw_res, us_res):
     plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='small', ncol=1)
     plt.grid(True, alpha=0.3)
     plt.tight_layout()
-    plt.savefig('output/stock_performance.png')
+    save_report_chart('output/charts/stock_performance.png')
     plt.show()
     plt.close()
-    print('Stock performance chart saved to output/stock_performance.png')
+    print('Stock performance chart saved to output/charts/stock_performance.png')
 
 
 def _process_stock_twr(res_data, region, plt_obj):
@@ -240,7 +248,15 @@ def analyze_put_protection(portfolio_df):
             contracts = float(put['Quantity_now']) / 100.0
             cost_basis = float(put['Cost'])
             try:
-                hist = yf.Ticker(underlying).history(period='1d')
+                def fetch_underlying():
+                    history = yf.Ticker(underlying).history(period='1d')
+                    if history.empty:
+                        raise ValueError(f'No underlying price returned for {underlying}')
+                    return history
+
+                hist = get_cached_data(
+                    f'put_underlying_history_{underlying}.pkl', fetch_underlying, ttl_seconds=900
+                )
                 s0 = hist['Close'].iloc[-1]
             except Exception:
                 s0 = 610.0 if underlying == 'QQQ' else 200.0
@@ -405,10 +421,10 @@ def analyze_put_protection(portfolio_df):
         pass
 
     plt.tight_layout()
-    plt.savefig('output/total_asset_protection.png')
+    save_report_chart('output/charts/total_asset_protection.png')
     plt.show()
     plt.close()
-    print('圖表已儲存至 output/total_asset_protection.png')
+    print('圖表已儲存至 output/charts/total_asset_protection.png')
 
     hedge_drops = np.linspace(-0.90, 0.20, 221)
     stock_pnl = []
@@ -482,7 +498,7 @@ def analyze_put_protection(portfolio_df):
         color='#555555',
     )
     plt.tight_layout(rect=[0, 0.04, 1, 0.94])
-    plt.savefig('output/put_stock_hedge_effect.png', dpi=160)
+    save_report_chart('output/charts/put_stock_hedge_effect.png', dpi=160)
     plt.show()
     plt.close()
-    print('圖表已儲存至 output/put_stock_hedge_effect.png')
+    print('圖表已儲存至 output/charts/put_stock_hedge_effect.png')

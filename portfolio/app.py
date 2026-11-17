@@ -7,6 +7,7 @@ import os
 import matplotlib.pyplot as plt
 from .transactions import build_combined_cash_ledger
 from .report_summary import render_summary_report
+from .reporting import save_report_chart
 
 from . import (
     DualLogger,
@@ -58,6 +59,8 @@ REPORT_CHARTS = [
     ('Drawdown Underwater', 'drawdown_underwater.png'),
     ('Cashflow Drawdown Comparison', 'cashflow_drawdown_comparison.png'),
     ('Cashflow Drawdown Spread vs QQQ', 'cashflow_drawdown_spread_vs_qqq.png'),
+    ('Cashflow Drawdown Comparison vs EWT', 'cashflow_drawdown_comparison_vs_ewt.png'),
+    ('Cashflow Drawdown Spread vs EWT', 'cashflow_drawdown_spread_vs_ewt.png'),
     ('Asset Pie Chart', 'asset_pie_chart.png'),
     ('Monthly Investment', 'monthly_investment.png'),
     ('Stock Performance', 'stock_performance.png'),
@@ -88,10 +91,10 @@ def print_chart_gallery():
     print("\n## Charts")
     printed = False
     for title, filename in REPORT_CHARTS:
-        chart_path = os.path.join('output', filename)
+        chart_path = os.path.join('output', 'charts', filename)
         if os.path.exists(chart_path):
             print(f"\n### {title}")
-            print(f"![{title}]({filename})")
+            print(f"![{title}](charts/{filename})")
             printed = True
     if not printed:
         print("No charts were generated.")
@@ -186,7 +189,7 @@ def plot_monthly_asset_allocation(tw_result, us_result, date_index, usd_twd_seri
     ax.tick_params(axis='x', rotation=45)
     ax.grid(True, axis='y', alpha=0.25)
     plt.tight_layout()
-    plt.savefig('output/asset_allocation_monthly.png')
+    save_report_chart('output/charts/asset_allocation_monthly.png')
     plt.show()
     plt.close()
 
@@ -309,7 +312,15 @@ def _parse_put_strike(occ_symbol):
 def _recommended_put_expiry(proxy_symbol, today):
     fallback = (today + pd.DateOffset(months=12)).normalize()
     try:
-        expiries = [pd.Timestamp(exp) for exp in yf.Ticker(proxy_symbol).options]
+        def fetch_expiries():
+            options = yf.Ticker(proxy_symbol).options
+            if not options:
+                raise ValueError(f'No option expiries returned for {proxy_symbol}')
+            return options
+
+        expiries = [pd.Timestamp(exp) for exp in get_cached_data(
+            f'put_expiries_{proxy_symbol}.pkl', fetch_expiries, ttl_seconds=900
+        )]
     except Exception:
         expiries = []
     candidates = [
@@ -337,7 +348,17 @@ def _option_buy_price(row):
 def _find_reset_put_hedge(proxy_symbol, expiry, proxy_px, contracts, exposure, target_moneyness=0.50, protection_scenario=-0.90):
     target_strike = proxy_px * target_moneyness
     try:
-        chain = yf.Ticker(proxy_symbol).option_chain(expiry.strftime('%Y-%m-%d')).puts.copy()
+        expiry_key = expiry.strftime('%Y-%m-%d')
+
+        def fetch_puts():
+            puts = yf.Ticker(proxy_symbol).option_chain(expiry_key).puts
+            if puts.empty:
+                raise ValueError(f'No put chain returned for {proxy_symbol} {expiry_key}')
+            return puts
+
+        chain = get_cached_data(
+            f'put_chain_{proxy_symbol}_{expiry_key}.pkl', fetch_puts, ttl_seconds=900
+        ).copy()
     except Exception:
         return None
 
@@ -531,10 +552,10 @@ def plot_put_position_history(us_result, date_index):
         ha='center', fontsize=9, color='#555555',
     )
     plt.tight_layout(rect=[0, 0.04, 1, 0.96])
-    plt.savefig('output/put_position_history.png', dpi=160)
+    save_report_chart('output/charts/put_position_history.png', dpi=160)
     plt.show()
     plt.close()
-    print('圖表已儲存至 output/put_position_history.png')
+    print('圖表已儲存至 output/charts/put_position_history.png')
 
 
 def plot_proxy_hedge_coverage(tw_result, us_result, date_index, final_portfolio_value_us, invested_capital_us):
@@ -591,7 +612,7 @@ def plot_proxy_hedge_coverage(tw_result, us_result, date_index, final_portfolio_
     ax.grid(True, alpha=0.3)
     ax.legend(loc='best')
     plt.tight_layout()
-    plt.savefig('output/proxy_hedge_coverage.png')
+    save_report_chart('output/charts/proxy_hedge_coverage.png')
     plt.show()
     plt.close()
 
@@ -632,7 +653,7 @@ def plot_proxy_hedge_coverage(tw_result, us_result, date_index, final_portfolio_
     total_put_market_value = qqq_current_put_value + tsm_current_put_value
     total_profit_us = final_portfolio_value_us - invested_capital_us
     print('\n### Put 成本紀錄')
-    print('保費是成本紀錄；重設組合用履約價 / 今日標的價約 50% 的災難保險規則，並用即時 option chain 估算成本。')
+    print('保費是成本紀錄；重設組合用履約價 / 今日標的價約 50% 的災難保險規則，並用 option chain 估算成本（報價快取最長 15 分鐘）。')
     print('| 項目 | 數值 |')
     print('| :--- | ---: |')
     print(f"| 投組市值 | {_format_usd(final_portfolio_value_us)} |")
@@ -673,7 +694,7 @@ def plot_proxy_hedge_coverage(tw_result, us_result, date_index, final_portfolio_
             f"${reset['buy_price']:.2f} ({reset['price_basis']}) | "
             f"{_format_usd(reset['gross_cost'])} | {_format_usd(net_cost)} | {_format_rate(reset['protection_rate'])} |"
         )
-    print('圖表已儲存至 output/proxy_hedge_coverage.png')
+    print('圖表已儲存至 output/charts/proxy_hedge_coverage.png')
 
 
 def process_tw_data():
@@ -1085,7 +1106,7 @@ def main():
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig('output/asset_trend.png')
+    save_report_chart('output/charts/asset_trend.png')
     plt.show()
     plt.close()
 
@@ -1102,7 +1123,7 @@ def main():
     plt.title('Funding Ratio（資產 ÷ 累積投入，TWD）')
     plt.xlabel('日期'); plt.ylabel('倍數')
     plt.legend(); plt.grid(True); plt.tight_layout()
-    plt.savefig('output/funding_ratio.png')
+    save_report_chart('output/charts/funding_ratio.png')
     plt.show()
     plt.close()
 
@@ -1112,7 +1133,7 @@ def main():
     plt.legend()
     plt.title('Portfolio Cumulative TWR Return')
     plt.grid(True)
-    plt.savefig('output/twr_chart.png')
+    save_report_chart('output/charts/twr_chart.png')
 
     for tk, ser in bench_twr_twd.items():
         plt.plot(ser.index, ser, label=f'{tk}', alpha=0.7)
@@ -1123,7 +1144,7 @@ def main():
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig('output/cumulative_return_comparison.png')
+    save_report_chart('output/charts/cumulative_return_comparison.png')
     plt.show()
     plt.close()
 
@@ -1136,7 +1157,7 @@ def main():
     plt.title('My Portfolio vs. 多重 Benchmark (USD)')
     plt.xlabel('日期'); plt.ylabel('市值 / 指數 (USD)')
     plt.legend(); plt.grid(True); plt.tight_layout()
-    plt.savefig('output/portfolio_vs_benchmark_usd.png')
+    save_report_chart('output/charts/portfolio_vs_benchmark_usd.png')
     plt.close()
     comparison_fx = align_fx_series(idx, usd_twd_series)
     plt.figure(figsize=(11, 6))
@@ -1150,7 +1171,7 @@ def main():
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig('output/portfolio_vs_benchmark_twd.png')
+    save_report_chart('output/charts/portfolio_vs_benchmark_twd.png')
     plt.show()
     plt.close()
 
@@ -1168,43 +1189,48 @@ def main():
     plt.legend()
     plt.grid(True)
     plt.tight_layout()
-    plt.savefig('output/drawdown_underwater.png')
+    save_report_chart('output/charts/drawdown_underwater.png')
     plt.show()
     plt.close()
 
-    # --- 3-5b. Same-Cashflow Drawdown vs QQQ ---
-    qqq_sim = sims.get('QQQ')
-    if qqq_sim is not None:
-        qqq_drawdown = (qqq_sim / qqq_sim.cummax() - 1) * 100
-        my_us_drawdown = (my_us / my_us.cummax() - 1) * 100
+    # --- 3-5b. Same-Cashflow Drawdown by Benchmark ---
+    my_us_drawdown = (my_us / my_us.cummax() - 1) * 100
+    for ticker, color, comparison_file, spread_file in (
+        ('QQQ', 'orange', 'cashflow_drawdown_comparison.png', 'cashflow_drawdown_spread_vs_qqq.png'),
+        ('EWT', 'orange', 'cashflow_drawdown_comparison_vs_ewt.png', 'cashflow_drawdown_spread_vs_ewt.png'),
+    ):
+        benchmark_sim = sims.get(ticker)
+        if benchmark_sim is None:
+            continue
+        benchmark_drawdown = (benchmark_sim / benchmark_sim.cummax() - 1) * 100
 
         plt.figure(figsize=(11, 6))
         plt.fill_between(my_us_drawdown.index, my_us_drawdown.values, 0, alpha=0.15, color='blue')
         plt.plot(my_us_drawdown.index, my_us_drawdown.values, label='My Portfolio', linewidth=2, color='blue')
-        plt.plot(qqq_drawdown.index, qqq_drawdown.values, label='QQQ ??', linewidth=2, alpha=0.85, color='orange')
-        plt.title('Same-Cashflow Drawdown vs. QQQ (USD)')
-        plt.xlabel('??')
+        plt.plot(benchmark_drawdown.index, benchmark_drawdown.values, label=ticker, linewidth=2, alpha=0.85, color=color)
+        plt.title(f'Same-Cashflow Drawdown vs. {ticker} (USD)')
+        plt.xlabel('Date')
         plt.ylabel('Drawdown (%)')
         plt.legend()
         plt.grid(True)
         plt.tight_layout()
-        plt.savefig('output/cashflow_drawdown_comparison.png')
+        save_report_chart(f'output/charts/{comparison_file}')
         plt.show()
         plt.close()
 
-        drawdown_spread = my_us_drawdown - qqq_drawdown.reindex(my_us_drawdown.index).ffill()
+        drawdown_spread = my_us_drawdown - benchmark_drawdown.reindex(my_us_drawdown.index).ffill()
         plt.figure(figsize=(11, 4.5))
         plt.axhline(0, color='gray', linestyle='--', linewidth=1)
         plt.fill_between(drawdown_spread.index, drawdown_spread.values, 0, where=(drawdown_spread.values >= 0), alpha=0.2, color='green')
         plt.fill_between(drawdown_spread.index, drawdown_spread.values, 0, where=(drawdown_spread.values < 0), alpha=0.2, color='red')
-        plt.plot(drawdown_spread.index, drawdown_spread.values, color='black', linewidth=1.8, label='My Drawdown - QQQ Drawdown')
-        plt.title('Drawdown Spread vs. QQQ (Positive = My Portfolio More Resilient)')
-        plt.xlabel('??')
+        plt.plot(drawdown_spread.index, drawdown_spread.values, color='#17365D' if ticker == 'EWT' else 'black', linewidth=1.8, label=f'My Drawdown - {ticker} Drawdown')
+        plt.title(f'Drawdown Spread vs. {ticker} (Positive = My Portfolio More Resilient)')
+        plt.xlabel('Date')
         plt.ylabel('Spread (%)')
         plt.legend()
         plt.grid(True)
         plt.tight_layout()
-        plt.savefig('output/cashflow_drawdown_spread_vs_qqq.png')
+        save_report_chart(f'output/charts/{spread_file}')
         plt.show()
         plt.close()
 
@@ -1229,7 +1255,7 @@ def main():
     plt.title(f'資產配置（含現金）｜總資產 {total_pie_twd:,.0f} 元')
     plt.axis('equal')
     plt.tight_layout()
-    plt.savefig('output/asset_pie_chart.png')
+    save_report_chart('output/charts/asset_pie_chart.png')
     plt.show()
     plt.close()
 
@@ -1245,7 +1271,7 @@ def main():
     plt.ylabel("投入金額 (USD)")
     plt.grid(True, axis='y')
     plt.tight_layout()
-    plt.savefig('output/monthly_investment.png')
+    save_report_chart('output/charts/monthly_investment.png')
     plt.show()
     plt.close()
 

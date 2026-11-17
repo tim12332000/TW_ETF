@@ -1,5 +1,9 @@
 # 專案基礎知識
 
+## 正式資料位置
+
+日常入口是根目錄 `startup.ipynb` 或 `python portfolio_report.py`。正式交易檔位於 `data/transactions/tw_train.csv` 與 `data/transactions/us_train.csv`；`data/imports/` 與 `data/reference/` 只保留歷史資料。報告仍位於 `output/report.md`、`output/report_details.md`，圖表位於 `output/charts/`。不要再把交易檔、研究圖或測試產物寫回根目錄。完整分類見 `docs/project_layout.md`。
+
 ## 已確認的合併現金模型（2026-09-27）
 
 - 起始現金為零；未記錄提款時，假設賣股與配息所得留在投組。

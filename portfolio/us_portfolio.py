@@ -4,6 +4,7 @@ import numpy as np
 import pandas as pd
 import yfinance as yf
 
+from .cache import get_cached_data
 from .positions import calculate_dividends_for_position, calculate_total_buy_for_position
 
 
@@ -124,8 +125,10 @@ def _append_us_split_events_from_yf(df):
 
 def _fetch_us_split_events(symbols, start_date, end_date):
     events = {}
+    start_key = pd.Timestamp(start_date).date().isoformat()
+    end_key = pd.Timestamp(end_date).date().isoformat()
     for symbol in symbols:
-        try:
+        def fetch_history():
             hist = yf.download(
                 symbol,
                 start=start_date,
@@ -134,9 +137,17 @@ def _fetch_us_split_events(symbols, start_date, end_date):
                 actions=True,
                 progress=False,
             )
+            # Yahoo also returns an empty frame on request failures. Let the
+            # caller retry instead of caching a failed request as no splits.
+            if not isinstance(hist, pd.DataFrame) or hist.empty:
+                raise ValueError(f"No split history returned for {symbol}")
+            return hist
+
+        try:
+            hist = get_cached_data(
+                f"us_split_history_{symbol}_{start_key}_{end_key}.pkl", fetch_history
+            )
         except Exception:
-            continue
-        if not isinstance(hist, pd.DataFrame) or hist.empty:
             continue
 
         split_obj = None
@@ -265,8 +276,10 @@ def process_us_data(
     get_latest_available_price,
     calculate_total_pnl_for_closed_position,
 ):
-    df_us = pd.read_csv("us_train.csv", encoding="utf-8-sig")
+    df_us = pd.read_csv("data/transactions/us_train.csv", encoding="utf-8-sig")
     df_us = df_us.copy()
+    # SPLG became SPYM in 2025; unify broker symbols before split and price lookups.
+    df_us["Symbol"] = df_us["Symbol"].replace({"SPLG": "SPYM"})
 
     df_us["Date"] = pd.to_datetime(df_us["Date"])
     df_us.sort_values("Date", inplace=True)

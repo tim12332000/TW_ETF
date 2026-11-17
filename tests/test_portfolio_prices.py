@@ -11,6 +11,7 @@ import pytest
 
 from portfolio import us_portfolio
 from portfolio.market_data import align_fx_series, get_latest_available_price
+from portfolio.performance import calculate_twr_series
 from portfolio.positions import calculate_total_pnl_for_closed_position
 from portfolio.transactions import build_cash_ledgers, clean_currency, fix_share_sign
 from portfolio.tw_portfolio import process_tw_data
@@ -41,6 +42,8 @@ def _sample_rows(market):
 @pytest.fixture
 def run_pipeline(monkeypatch, tmp_path):
     monkeypatch.chdir(tmp_path)
+    transaction_dir = tmp_path / "data" / "transactions"
+    transaction_dir.mkdir(parents=True)
     # Quantity normalization still runs, with a deterministic empty split history.
     monkeypatch.setattr(us_portfolio.yf, "download", lambda *args, **kwargs: pd.DataFrame())
 
@@ -48,7 +51,7 @@ def run_pipeline(monkeypatch, tmp_path):
         rows = _sample_rows(market) if rows is None else rows
         frame = pd.DataFrame(rows, columns=["Date", "Action", "Symbol", "Quantity", "Price", "Amount"])
         frame["Name"] = frame["Symbol"] + " name"
-        frame.to_csv(f"{market}_train.csv", index=False, encoding="utf-8-sig")
+        frame.to_csv(transaction_dir / f"{market}_train.csv", index=False, encoding="utf-8-sig")
         history = {"ALPHA": 100.0, "BETA": 200.0, "CLOSED": 50.0, OPTION: 3.0} if history is None else history
 
         def daily_prices(symbols, start_date, end_date, *, is_tw):
@@ -86,6 +89,20 @@ def run_pipeline(monkeypatch, tmp_path):
         )
 
     return run
+
+
+@pytest.mark.parametrize("market", ["tw", "us"])
+def test_pipeline_reads_transactions_directory_instead_of_stale_root_csv(run_pipeline, market):
+    legacy_file = Path(f"{market}_train.csv")
+    legacy_file.write_text("stale root file", encoding="utf-8")
+
+    result = run_pipeline(market, lambda symbol, **kwargs: 100.0)
+
+    expected_symbols = ["ALPHA", "BETA", "CLOSED", "CLOSED", "ALPHA"]
+    if market == "us":
+        expected_symbols.insert(3, OPTION)
+    assert result["df"]["Symbol"].tolist() == expected_symbols
+    assert legacy_file.read_text(encoding="utf-8") == "stale root file"
 
 
 def test_tw_valuation_preserves_fx_costs_dividends_and_return_contract(run_pipeline):
@@ -277,3 +294,101 @@ def test_reuses_unavailable_results_by_symbol_membership(run_pipeline, market, q
     rows = [("2026-01-05", "buy", "ALPHA", 2.0, 100.0, -200.0)]
     run_pipeline(market, provider, rows=rows, history={})
     assert calls == ["ALPHA"]
+
+
+def _renamed_etf_rows(first="SPLG", second="SPYM"):
+    return [
+        ("2026-01-05", "buy", first, 2.0, 100.0, -200.0),
+        ("2026-01-06", "buy", second, 3.0, 110.0, -330.0),
+        ("2026-01-07", "buy", "ALPHA", 1.0, 50.0, -50.0),
+        ("2026-01-08", "Cash Dividend", first, np.nan, 0.0, 12.0),
+        ("2026-01-09", "Foreign Tax Withheld", second, np.nan, 0.0, -3.0),
+        ("2026-01-12", "Cash Dividend", second, 0.0, 0.0, 8.0),
+        ("2026-01-13", "Foreign Tax Withheld", first, 0.0, 0.0, -2.0),
+    ]
+
+
+@pytest.mark.parametrize(
+    "first, second", [("SPLG", "SPLG"), ("SPYM", "SPYM"), ("SPLG", "SPYM")],
+    ids=["old-only", "canonical-only", "mixed"],
+)
+def test_spym_ingestion_canonicalizes_all_actions_without_rewriting_csv(
+    run_pipeline, monkeypatch, first, second,
+):
+    split_calls, history_calls, quote_calls, raw_csv = [], [], [], []
+    read_csv = pd.read_csv
+
+    def read_source(path, **kwargs):
+        raw_csv.append(Path(path).read_bytes())
+        return read_csv(path, **kwargs)
+
+    def split_history(symbol, **kwargs):
+        split_calls.append(symbol)
+        return pd.DataFrame()
+
+    class Prices(dict):
+        def get(self, symbol, default=None):
+            history_calls.append(symbol)
+            return super().get(symbol, default)
+
+    def quote(symbol, *, history_series, is_tw):
+        assert is_tw is False
+        quote_calls.append(symbol)
+        return 60.0 if symbol == "ALPHA" else 120.0
+
+    monkeypatch.setattr(pd, "read_csv", read_source)
+    monkeypatch.setattr(us_portfolio.yf, "download", split_history)
+    result = run_pipeline("us", quote, rows=_renamed_etf_rows(first, second),
+                          history=Prices(ALPHA=50.0, SPYM=110.0))
+    assert Path("data/transactions/us_train.csv").read_bytes() == raw_csv[0]
+    assert result["df"]["Symbol"].tolist() == ["SPYM", "SPYM", "ALPHA"] + ["SPYM"] * 4
+    assert split_calls == ["SPYM", "ALPHA"]
+    assert history_calls == quote_calls == ["ALPHA", "SPYM"]
+    assert result["price_data"].columns.tolist() == ["ALPHA", "SPYM"]
+    positions = result["portfolio_df"].set_index("Symbol")
+    assert positions.index.tolist() == ["SPYM", "ALPHA"]
+    assert positions.loc["SPYM", "Quantity_now"] == 5.0
+    assert positions.loc["SPYM", "Dividend"] == 20.0  # Gross dividends exclude withholding tax.
+    assert result["df"]["Quantity"].isna().sum() == 2
+    assert result["cash_transactions"]["Amount"].tolist() == [-200, -330, -50, 12, -3, 8, -2]
+    assert result["cash_transactions"]["Amount"].sum() == -565.0  # Net cash includes each tax once.
+    assert result["portfolio_snapshot"] == 660.0
+
+
+def test_spym_mixed_input_matches_all_canonical_cashflows_history_and_twr(run_pipeline):
+    def quote(symbol, **kwargs):
+        return 60.0 if symbol == "ALPHA" else 120.0
+
+    mixed = run_pipeline("us", quote, rows=_renamed_etf_rows(), history={"ALPHA": 50.0, "SPYM": 110.0})
+    canonical = run_pipeline("us", quote, rows=_renamed_etf_rows("SPYM", "SPYM"),
+                             history={"ALPHA": 50.0, "SPYM": 110.0})
+    for key in ["transaction_cashflows", "external_cashflows", "invested_capital", "total_investment",
+                "portfolio_snapshot", "final_portfolio_value", "total_profit", "total_profit_pct"]:
+        assert mixed[key] == canonical[key]
+    for key in ["cash_transactions", "price_data", "portfolio_df"]:
+        pd.testing.assert_frame_equal(mixed[key], canonical[key])
+    pd.testing.assert_series_equal(mixed["portfolio_value"], canonical["portfolio_value"])
+    pd.testing.assert_series_equal(
+        calculate_twr_series(mixed["portfolio_value"], mixed["external_cashflows"]),
+        calculate_twr_series(canonical["portfolio_value"], canonical["external_cashflows"]),
+    )
+    assert mixed["portfolio_df"].set_index("Symbol").loc["ALPHA", "Quantity_now"] == 1.0
+
+
+def test_spym_alias_is_canonical_before_split_normalization(run_pipeline, monkeypatch):
+    split_calls = []
+
+    def split_history(symbol, **kwargs):
+        split_calls.append(symbol)
+        if symbol == "SPYM":
+            return pd.DataFrame({"Stock Splits": [2.0]}, index=pd.to_datetime(["2026-01-07"]))
+        return pd.DataFrame()
+
+    monkeypatch.setattr(us_portfolio.yf, "download", split_history)
+    rows = [("2026-01-05", "buy", "SPLG", 2.0, 100.0, -200.0),
+            ("2026-01-08", "buy", "SPYM", 3.0, 110.0, -330.0)]
+    result = run_pipeline("us", lambda *args, **kwargs: 120.0, rows=rows, history={"SPYM": 110.0})
+    assert split_calls == ["SPYM"]
+    assert result["df"]["Symbol"].tolist() == ["SPYM", "SPYM"]
+    assert result["df"]["Quantity"].tolist() == [4.0, 3.0]
+    assert result["portfolio_df"].iloc[0]["Quantity_now"] == 7.0

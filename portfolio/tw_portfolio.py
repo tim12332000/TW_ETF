@@ -17,7 +17,7 @@ def process_tw_data(
     calculate_total_pnl_for_closed_position,
     record_calibrations,
 ):
-    df_tw = pd.read_csv("tw_train.csv", encoding="utf-8-sig")
+    df_tw = pd.read_csv("data/transactions/tw_train.csv", encoding="utf-8-sig")
     df_tw.rename(
         columns={
             "交易日": "Date",
@@ -33,7 +33,7 @@ def process_tw_data(
     required_columns = ["Date", "Action", "Symbol", "Quantity", "Price", "Amount"]
     missing_columns = [col for col in required_columns if col not in df_tw.columns]
     if missing_columns:
-        raise KeyError(f"tw_train.csv missing expected columns: {missing_columns}; actual columns: {list(df_tw.columns)}")
+        raise KeyError(f"data/transactions/tw_train.csv missing expected columns: {missing_columns}; actual columns: {list(df_tw.columns)}")
     df_tw["Date"] = pd.to_datetime(df_tw["Date"])
     df_tw.sort_values("Date", inplace=True)
     df_tw["Quantity"] = pd.to_numeric(df_tw["Quantity"], errors="coerce")
