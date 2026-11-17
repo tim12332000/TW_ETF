@@ -36,9 +36,6 @@ def test_report_refreshes_stale_cash_and_benchmark_modules(monkeypatch, tmp_path
         return result
 
     monkeypatch.setattr(notebook.importlib, 'reload', reload_with_stubbed_report)
-    # The production notebook suppresses plot windows; restore shared pyplot
-    # state when this test exits.
-    monkeypatch.setattr(portfolio.app.plt, 'show', portfolio.app.plt.show)
     path, text, generated_at = notebook.generate_report()
     assert text == '# Refreshed report'
     assert path.exists()
@@ -76,7 +73,6 @@ def test_report_refreshes_stale_cache_before_all_consumers(monkeypatch, tmp_path
         return result
 
     monkeypatch.setattr(notebook.importlib, 'reload', reload_with_stubbed_report)
-    monkeypatch.setattr(portfolio.app.plt, 'show', portfolio.app.plt.show)
     path, text, generated_at = notebook.generate_report()
 
     assert text == '# Refreshed cache'
@@ -155,3 +151,33 @@ def test_startup_cell_reloads_notebook_before_generating_report(monkeypatch):
     exec(compile(source, 'startup.ipynb', 'exec'), {})
 
     assert calls == ['reload', 'fresh']
+
+
+def test_report_recalculates_and_redraws_on_every_call(monkeypatch, tmp_path):
+    real_reload = notebook.importlib.reload
+    builds = []
+
+    def reload_with_renderer(module):
+        result = real_reload(module)
+        if module.__name__ == 'portfolio.app':
+            def main():
+                monkeypatch.chdir(tmp_path)
+                builds.append(len(builds) + 1)
+                chart_path = tmp_path / 'output/charts/redraw.svg'
+                result.charts.figure()
+                result.charts.plot([0, 1], [0, builds[-1]], label='Recomputed')
+                result.save_report_chart(chart_path)
+                result.charts.close()
+                (tmp_path / 'output/report.md').write_text('# Current report', encoding='utf-8')
+            monkeypatch.setattr(result, 'main', main)
+        return result
+
+    monkeypatch.setattr(notebook.importlib, 'reload', reload_with_renderer)
+    notebook.generate_report()
+    first = (tmp_path / 'output/charts/redraw.svg').read_bytes()
+    notebook.generate_report()
+    second = (tmp_path / 'output/charts/redraw.svg').read_bytes()
+
+    assert builds == [1, 2]
+    # Shape is proportional for two points; distinct domains still change tick labels.
+    assert first != second

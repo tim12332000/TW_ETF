@@ -12,6 +12,7 @@ def generate_report():
     import portfolio
     import portfolio.cache
     import portfolio.market_data
+    import portfolio.svg_charts
     import portfolio.transactions
     import portfolio.performance
     import portfolio.benchmarking
@@ -25,6 +26,7 @@ def generate_report():
     # retain old cache signatures or transactions without newly added functions.
     importlib.reload(portfolio.cache)
     importlib.reload(portfolio.market_data)
+    importlib.reload(portfolio.svg_charts)
     importlib.reload(portfolio.transactions)
     importlib.reload(portfolio.performance)
     importlib.reload(portfolio.benchmarking)
@@ -36,9 +38,6 @@ def generate_report():
     importlib.reload(portfolio)
     import portfolio.app
     importlib.reload(portfolio.app)
-
-    portfolio.app.plt.show = lambda *args, **kwargs: None
-    portfolio.reporting.plt.show = lambda *args, **kwargs: None
 
     with contextlib.redirect_stdout(io.StringIO()):
         portfolio.app.main()

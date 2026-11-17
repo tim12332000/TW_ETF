@@ -27,8 +27,11 @@ Active transactions are `data/transactions/tw_train.csv` and
 ## Outputs
 
 The current reports are `output/report.md` and `output/report_details.md`.
-Their 19 figures are in `output/charts/`; the shared daily cash ledger is
+Their 19 freshly rendered SVG figures are in `output/charts/`; the shared daily cash ledger is
 `output/combined_cash_ledger.csv`.
+
+The core chart renderer is `portfolio/svg_charts.py`. It writes SVG directly
+without Matplotlib, PNG encoding, downsampling or completed-chart reuse.
 
 Research artifacts live in `output/research/` by topic. Old validation files
 live in `output/diagnostics/`, spreadsheet exports in `output/exports/`, and

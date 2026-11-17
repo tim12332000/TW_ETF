@@ -18,12 +18,16 @@ python portfolio_report.py
 | `output/report.md` | 台幣摘要與 5 張核心圖 |
 | `output/report_details.md` | 完整明細、美元指標與避險分析 |
 | `output/combined_cash_ledger.csv` | 合併逐日現金帳本 |
-| `output/charts/` | 目前報告的 19 張圖 |
+| `output/charts/` | 每次重新繪製的 19 張 SVG 圖 |
 | `output/research/` | 研究產物，按槓桿、避險、比較、NTSD 分類 |
 | `output/diagnostics/` | 歷次驗證紀錄、基準與稽核快照 |
 | `output/exports/`、`output/archive/` | 歷史試算表匯出與舊文字報告 |
 
 主程式只讀取 `data/transactions/` 的兩份交易檔，不會使用歷史匯入或研究快照取代它們。整理時保留所有 CSV 內容。
+
+正式報告使用專用 SVG 繪圖器，直接產生向量圖，不經 Matplotlib 或 PNG 編碼。每次執行都重新計算與繪製全部圖表，不重用舊報告或圖檔；市場行情仍依下述快取期限取得。圖中保留全部資料點、缺值斷線與現金配置，沒有抽樣。
+
+量測完整重算：`python tools/diagnostics/benchmark_report.py --runs 3`。結果存入 `output/diagnostics/svg-report-timing.json`，分別記錄總耗時、繪圖耗時及每輪重寫圖檔數。
 
 ## 程式與工具
 
@@ -50,6 +54,6 @@ docs/                      模型、計算前提與目錄說明
 
 `cache/` 按 `quotes`、`prices`、`options`、`fx`、`benchmarks`、`splits` 分類。過期快照保留在 `cache/archive/`，不會作為有效行情讀取。一般行情快取 24 小時，避險重設使用的選擇權資料快取 15 分鐘。
 
-工具狀態及封存的驗證副本在 `.omx/`，與正式資料分開。產物、快取、Notebook 檢查點與測試暫存不應新增進版本控制；既有 Git 追蹤紀錄未重寫。
+工具狀態及封存的驗證副本在 `.omx/`，與正式資料分開。產物、快取、Notebook 檢查點與測試暫存不應新增進版本控制；既有 Git 歷史未重寫。
 
 執行測試：`python -m pytest tests -q`。完整目錄與搬移說明見 [docs/project_layout.md](docs/project_layout.md)。

@@ -18,6 +18,7 @@ def test_summary_has_one_currency_cash_and_five_core_charts():
     assert '1,200' in text and '8.33%' in text
     assert text.count('![') == 5
     assert text.count('](charts/') == 5
+    assert text.count('.svg)') == 5
     assert 'report_details.md' in text
     assert '未持有 Put' in text
     assert 'Execution Summary' not in text

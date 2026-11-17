@@ -4,7 +4,7 @@ import sys
 import numpy as np
 import yfinance as yf
 import os
-import matplotlib.pyplot as plt
+from . import svg_charts as charts
 from .transactions import build_combined_cash_ledger
 from .report_summary import render_summary_report
 from .reporting import save_report_chart
@@ -43,38 +43,35 @@ from . import (
 # Set CWD to script directory
 os.chdir(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import hashlib
-from matplotlib import rcParams
 from tabulate import tabulate
 
 # Global Counters for logging
 CALIBRATIONS = 0
 
 REPORT_CHARTS = [
-    ('Asset Trend', 'asset_trend.png'),
-    ('Daily Asset Allocation', 'asset_allocation_monthly.png'),
-    ('Funding Ratio', 'funding_ratio.png'),
-    ('Portfolio TWR', 'twr_chart.png'),
-    ('Cumulative Return Comparison', 'cumulative_return_comparison.png'),
-    ('Portfolio vs Benchmark USD', 'portfolio_vs_benchmark_usd.png'),
-    ('Drawdown Underwater', 'drawdown_underwater.png'),
-    ('Cashflow Drawdown Comparison', 'cashflow_drawdown_comparison.png'),
-    ('Cashflow Drawdown Spread vs QQQ', 'cashflow_drawdown_spread_vs_qqq.png'),
-    ('Cashflow Drawdown Comparison vs EWT', 'cashflow_drawdown_comparison_vs_ewt.png'),
-    ('Cashflow Drawdown Spread vs EWT', 'cashflow_drawdown_spread_vs_ewt.png'),
-    ('Asset Pie Chart', 'asset_pie_chart.png'),
-    ('Monthly Investment', 'monthly_investment.png'),
-    ('Stock Performance', 'stock_performance.png'),
-    ('Put Position Value History', 'put_position_history.png'),
-    ('Put vs Stock Hedge Effect', 'put_stock_hedge_effect.png'),
-    ('代理避險情境保護率', 'proxy_hedge_coverage.png'),
-    ('Put 避險保護全投組壓力測試', 'total_asset_protection.png'),
+    ('Asset Trend', 'asset_trend.svg'),
+    ('Daily Asset Allocation', 'asset_allocation_monthly.svg'),
+    ('Funding Ratio', 'funding_ratio.svg'),
+    ('Portfolio TWR', 'twr_chart.svg'),
+    ('Cumulative Return Comparison', 'cumulative_return_comparison.svg'),
+    ('Portfolio vs Benchmark USD', 'portfolio_vs_benchmark_usd.svg'),
+    ('Drawdown Underwater', 'drawdown_underwater.svg'),
+    ('Cashflow Drawdown Comparison', 'cashflow_drawdown_comparison.svg'),
+    ('Cashflow Drawdown Spread vs QQQ', 'cashflow_drawdown_spread_vs_qqq.svg'),
+    ('Cashflow Drawdown Comparison vs EWT', 'cashflow_drawdown_comparison_vs_ewt.svg'),
+    ('Cashflow Drawdown Spread vs EWT', 'cashflow_drawdown_spread_vs_ewt.svg'),
+    ('Asset Pie Chart', 'asset_pie_chart.svg'),
+    ('Monthly Investment', 'monthly_investment.svg'),
+    ('Stock Performance', 'stock_performance.svg'),
+    ('Put Position Value History', 'put_position_history.svg'),
+    ('Put vs Stock Hedge Effect', 'put_stock_hedge_effect.svg'),
+    ('代理避險情境保護率', 'proxy_hedge_coverage.svg'),
+    ('Put 避險保護全投組壓力測試', 'total_asset_protection.svg'),
 ]
 
 # =============================================================================
-# 全域設定：設定中文字型與正確顯示負號
+# 報告輸出目錄（SVG 字型與座標由專用繪圖器處理）
 # =============================================================================
-rcParams['font.sans-serif'] = ['Microsoft YaHei']
-rcParams['axes.unicode_minus'] = False
 if not os.path.exists('output'):
     os.makedirs('output')
 
@@ -171,8 +168,8 @@ def plot_monthly_asset_allocation(tw_result, us_result, date_index, usd_twd_seri
     if (other > 1e-8).any():
         daily_alloc['Other'] = other.clip(lower=0)
 
-    fig, ax = plt.subplots(figsize=(14, 7))
-    colors = plt.get_cmap('tab20').colors
+    fig, ax = charts.subplots(figsize=(14, 7))
+    colors = charts.get_cmap('tab20').colors
     ax.stackplot(
         daily_alloc.index,
         [daily_alloc[col].values for col in daily_alloc.columns],
@@ -188,10 +185,8 @@ def plot_monthly_asset_allocation(tw_result, us_result, date_index, usd_twd_seri
     ax.legend(bbox_to_anchor=(1.02, 1), loc='upper left', fontsize='small')
     ax.tick_params(axis='x', rotation=45)
     ax.grid(True, axis='y', alpha=0.25)
-    plt.tight_layout()
-    save_report_chart('output/charts/asset_allocation_monthly.png')
-    plt.show()
-    plt.close()
+    save_report_chart('output/charts/asset_allocation_monthly.svg')
+    charts.close()
 
 
 def _weighted_exposure(value_history, weights):
@@ -416,7 +411,7 @@ def plot_put_position_history(us_result, date_index):
     cost_values = {}
     actual_values = {}
     exit_values = {}
-    colors = plt.get_cmap('tab10').colors
+    colors = charts.get_cmap('tab10').colors
 
     for symbol in put_symbols:
         meta = parse_occ_symbol(symbol)
@@ -454,10 +449,10 @@ def plot_put_position_history(us_result, date_index):
         if pd.isna(entry_iv):
             entry_iv = 0.40
 
-        model_price = []
-        for dt, spot in underlying_px.items():
-            years = max((meta['expiry'] - dt).days / 365.0, 1 / 365.0)
-            model_price.append(black_scholes_put(float(spot), meta['strike'], years, 0.045, entry_iv))
+        years = np.maximum((meta['expiry'] - history_index).days / 365.0, 1 / 365.0)
+        model_price = black_scholes_put(
+            underlying_px.to_numpy(dtype=float), meta['strike'], years, 0.045, entry_iv
+        )
         position_value = pd.Series(model_price, index=history_index) * quantity
         model_values[symbol] = position_value.where(quantity > 0)
 
@@ -483,7 +478,7 @@ def plot_put_position_history(us_result, date_index):
     total_cost = cost_df.sum(axis=1)
     total_actual = sum(value for value in actual_values.values() if pd.notna(value))
 
-    fig, (ax_positions, ax_total) = plt.subplots(2, 1, figsize=(14, 9), sharex=True)
+    fig, (ax_positions, ax_total) = charts.subplots(2, 1, figsize=(14, 9), sharex=True)
     for idx, symbol in enumerate(model_df.columns):
         color = colors[idx % len(colors)]
         meta = parse_occ_symbol(symbol)
@@ -551,11 +546,9 @@ def plot_put_position_history(us_result, date_index):
         '歷史曲線為 Black-Scholes 模型估值（以買入價反推進場 IV）；X 為目前實際市價，不代表歷史真實報價。',
         ha='center', fontsize=9, color='#555555',
     )
-    plt.tight_layout(rect=[0, 0.04, 1, 0.96])
-    save_report_chart('output/charts/put_position_history.png', dpi=160)
-    plt.show()
-    plt.close()
-    print('圖表已儲存至 output/charts/put_position_history.png')
+    save_report_chart('output/charts/put_position_history.svg')
+    charts.close()
+    print('圖表已儲存至 output/charts/put_position_history.svg')
 
 
 def plot_proxy_hedge_coverage(tw_result, us_result, date_index, final_portfolio_value_us, invested_capital_us):
@@ -602,8 +595,9 @@ def plot_proxy_hedge_coverage(tw_result, us_result, date_index, final_portfolio_
     if plot_df.empty:
         return
 
-    fig, ax = plt.subplots(figsize=(12, 6))
-    plot_df.plot(ax=ax, linewidth=2)
+    fig, ax = charts.subplots(figsize=(12, 6))
+    for label, values in plot_df.items():
+        ax.plot(plot_df.index, values, label=label, linewidth=2)
     ax.axhline(30, color='orange', linestyle=':', linewidth=1, label='參考線 30%')
     ax.axhline(50, color='green', linestyle=':', linewidth=1, label='參考線 50%')
     ax.set_title('代理避險情境保護率')
@@ -611,10 +605,8 @@ def plot_proxy_hedge_coverage(tw_result, us_result, date_index, final_portfolio_
     ax.set_ylabel('Put 預估 payout / 資產池情境損失 (%)')
     ax.grid(True, alpha=0.3)
     ax.legend(loc='best')
-    plt.tight_layout()
-    save_report_chart('output/charts/proxy_hedge_coverage.png')
-    plt.show()
-    plt.close()
+    save_report_chart('output/charts/proxy_hedge_coverage.svg')
+    charts.close()
 
     latest_us_exposure = float(us_exposure.replace(0, np.nan).dropna().iloc[-1])
     latest_tw_exposure = float(tw_exposure.replace(0, np.nan).dropna().iloc[-1])
@@ -694,7 +686,7 @@ def plot_proxy_hedge_coverage(tw_result, us_result, date_index, final_portfolio_
             f"${reset['buy_price']:.2f} ({reset['price_basis']}) | "
             f"{_format_usd(reset['gross_cost'])} | {_format_usd(net_cost)} | {_format_rate(reset['protection_rate'])} |"
         )
-    print('圖表已儲存至 output/charts/proxy_hedge_coverage.png')
+    print('圖表已儲存至 output/charts/proxy_hedge_coverage.svg')
 
 
 def process_tw_data():
@@ -1097,18 +1089,16 @@ def main():
     # =================================================================
 
     # --- 3-1. 資產走勢圖 + 累積投入資金線（全局概覽） ---
-    plt.figure(figsize=(10, 6))
-    plt.plot(combined_portfolio_value_twd.index, combined_portfolio_value_twd.values, label='資產走勢圖')
-    plt.plot(daily_invested_capital_twd.index, daily_invested_capital_twd.values, label='累積投入資金', linestyle='--')
-    plt.title('資產走勢圖')
-    plt.xlabel('日期')
-    plt.ylabel('組合市值 (TWD)')
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    save_report_chart('output/charts/asset_trend.png')
-    plt.show()
-    plt.close()
+    charts.figure(figsize=(10, 6))
+    charts.plot(combined_portfolio_value_twd.index, combined_portfolio_value_twd.values, label='資產走勢圖')
+    charts.plot(daily_invested_capital_twd.index, daily_invested_capital_twd.values, label='累積投入資金', linestyle='--')
+    charts.title('資產走勢圖')
+    charts.xlabel('日期')
+    charts.ylabel('組合市值 (TWD)')
+    charts.legend()
+    charts.grid(True)
+    save_report_chart('output/charts/asset_trend.svg')
+    charts.close()
 
     # --- 3-1b. Monthly asset allocation ---
     plot_monthly_asset_allocation(tw_result, us_result, date_index, usd_twd_series, cash_twd)
@@ -1117,122 +1107,111 @@ def main():
     _den = daily_invested_capital_twd.replace(0, np.nan)
     ratio = (combined_portfolio_value_twd / _den).dropna()
 
-    plt.figure(figsize=(10, 5))
-    plt.plot(ratio.index, ratio.values, label='Funding Ratio (資產/累積投入)')
-    plt.axhline(1.0, linestyle='--', alpha=0.6, label='=1（打平）')
-    plt.title('Funding Ratio（資產 ÷ 累積投入，TWD）')
-    plt.xlabel('日期'); plt.ylabel('倍數')
-    plt.legend(); plt.grid(True); plt.tight_layout()
-    save_report_chart('output/charts/funding_ratio.png')
-    plt.show()
-    plt.close()
+    charts.figure(figsize=(10, 5))
+    charts.plot(ratio.index, ratio.values, label='Funding Ratio (資產/累積投入)')
+    charts.axhline(1.0, linestyle='--', alpha=0.6, label='=1（打平）')
+    charts.title('Funding Ratio（資產 ÷ 累積投入，TWD）')
+    charts.xlabel('日期'); charts.ylabel('倍數')
+    charts.legend(); charts.grid(True)
+    save_report_chart('output/charts/funding_ratio.svg')
+    charts.close()
 
     # --- 3-3. 累積報酬率比較 (TWR) ---
-    plt.figure(figsize=(12, 6))
-    plt.plot(twr_series_twd.index, twr_series_twd, label='My Portfolio (TWR, TWD)', linewidth=2, color='blue')
-    plt.legend()
-    plt.title('Portfolio Cumulative TWR Return')
-    plt.grid(True)
-    save_report_chart('output/charts/twr_chart.png')
+    charts.figure(figsize=(12, 6))
+    charts.plot(twr_series_twd.index, twr_series_twd, label='My Portfolio (TWR, TWD)', linewidth=2, color='blue')
+    charts.legend()
+    charts.title('Portfolio Cumulative TWR Return')
+    charts.grid(True)
+    save_report_chart('output/charts/twr_chart.svg')
 
     for tk, ser in bench_twr_twd.items():
-        plt.plot(ser.index, ser, label=f'{tk}', alpha=0.7)
+        charts.plot(ser.index, ser, label=f'{tk}', alpha=0.7)
 
-    plt.title('累積報酬率比較 (Time-Weighted Return)')
-    plt.xlabel('日期')
-    plt.ylabel('累積報酬 (%)')
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    save_report_chart('output/charts/cumulative_return_comparison.png')
-    plt.show()
-    plt.close()
+    charts.title('累積報酬率比較 (Time-Weighted Return)')
+    charts.xlabel('日期')
+    charts.ylabel('累積報酬 (%)')
+    charts.legend()
+    charts.grid(True)
+    save_report_chart('output/charts/cumulative_return_comparison.svg')
+    charts.close()
 
     # --- 3-4. My Portfolio vs Benchmark (USD 絕對市值) ---
-    plt.figure(figsize=(11, 6))
-    plt.plot(my_us, label='My Portfolio', linewidth=2)
+    charts.figure(figsize=(11, 6))
+    charts.plot(my_us, label='My Portfolio', linewidth=2)
     for tk, p in sims.items():
-        plt.plot(p, label=f'{tk} 模擬')
-    plt.plot(daily_invested_capital.reindex(idx).ffill(), label='累積投入資金 (USD)', linestyle='--', linewidth=1.5)
-    plt.title('My Portfolio vs. 多重 Benchmark (USD)')
-    plt.xlabel('日期'); plt.ylabel('市值 / 指數 (USD)')
-    plt.legend(); plt.grid(True); plt.tight_layout()
-    save_report_chart('output/charts/portfolio_vs_benchmark_usd.png')
-    plt.close()
+        charts.plot(p, label=f'{tk} 模擬')
+    charts.plot(daily_invested_capital.reindex(idx).ffill(), label='累積投入資金 (USD)', linestyle='--', linewidth=1.5)
+    charts.title('My Portfolio vs. 多重 Benchmark (USD)')
+    charts.xlabel('日期'); charts.ylabel('市值 / 指數 (USD)')
+    charts.legend(); charts.grid(True)
+    save_report_chart('output/charts/portfolio_vs_benchmark_usd.svg')
+    charts.close()
     comparison_fx = align_fx_series(idx, usd_twd_series)
-    plt.figure(figsize=(11, 6))
-    plt.plot(my_us * comparison_fx, label='我的投組（含現金）', linewidth=2)
+    charts.figure(figsize=(11, 6))
+    charts.plot(my_us * comparison_fx, label='我的投組（含現金）', linewidth=2)
     for tk, p in sims.items():
-        plt.plot(p * comparison_fx, label=tk)
-    plt.plot(daily_invested_capital_twd.reindex(idx).ffill(), label='累積投入', linestyle='--')
-    plt.title('同投入資產比較（TWD）')
-    plt.xlabel('日期')
-    plt.ylabel('總資產（台幣）')
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    save_report_chart('output/charts/portfolio_vs_benchmark_twd.png')
-    plt.show()
-    plt.close()
+        charts.plot(p * comparison_fx, label=tk)
+    charts.plot(daily_invested_capital_twd.reindex(idx).ffill(), label='累積投入', linestyle='--')
+    charts.title('同投入資產比較（TWD）')
+    charts.xlabel('日期')
+    charts.ylabel('總資產（台幣）')
+    charts.legend()
+    charts.grid(True)
+    save_report_chart('output/charts/portfolio_vs_benchmark_twd.svg')
+    charts.close()
 
     # --- 3-5. Drawdown 水下圖 ---
     wealth_index = 1 + twr_series_twd / 100.0
     running_max_dd = wealth_index.cummax()
     drawdown = (wealth_index - running_max_dd) / running_max_dd
 
-    plt.figure(figsize=(10, 6))
-    plt.fill_between(drawdown.index, drawdown * 100, color='red', alpha=0.3)
-    plt.plot(drawdown.index, drawdown * 100, label='Drawdown (%)')
-    plt.title('最大回撤（Drawdown）水下圖')
-    plt.xlabel('日期')
-    plt.ylabel('回撤 (%)')
-    plt.legend()
-    plt.grid(True)
-    plt.tight_layout()
-    save_report_chart('output/charts/drawdown_underwater.png')
-    plt.show()
-    plt.close()
+    charts.figure(figsize=(10, 6))
+    charts.fill_between(drawdown.index, drawdown * 100, color='red', alpha=0.3)
+    charts.plot(drawdown.index, drawdown * 100, label='Drawdown (%)')
+    charts.title('最大回撤（Drawdown）水下圖')
+    charts.xlabel('日期')
+    charts.ylabel('回撤 (%)')
+    charts.legend()
+    charts.grid(True)
+    save_report_chart('output/charts/drawdown_underwater.svg')
+    charts.close()
 
     # --- 3-5b. Same-Cashflow Drawdown by Benchmark ---
     my_us_drawdown = (my_us / my_us.cummax() - 1) * 100
     for ticker, color, comparison_file, spread_file in (
-        ('QQQ', 'orange', 'cashflow_drawdown_comparison.png', 'cashflow_drawdown_spread_vs_qqq.png'),
-        ('EWT', 'orange', 'cashflow_drawdown_comparison_vs_ewt.png', 'cashflow_drawdown_spread_vs_ewt.png'),
+        ('QQQ', 'orange', 'cashflow_drawdown_comparison.svg', 'cashflow_drawdown_spread_vs_qqq.svg'),
+        ('EWT', 'orange', 'cashflow_drawdown_comparison_vs_ewt.svg', 'cashflow_drawdown_spread_vs_ewt.svg'),
     ):
         benchmark_sim = sims.get(ticker)
         if benchmark_sim is None:
             continue
         benchmark_drawdown = (benchmark_sim / benchmark_sim.cummax() - 1) * 100
 
-        plt.figure(figsize=(11, 6))
-        plt.fill_between(my_us_drawdown.index, my_us_drawdown.values, 0, alpha=0.15, color='blue')
-        plt.plot(my_us_drawdown.index, my_us_drawdown.values, label='My Portfolio', linewidth=2, color='blue')
-        plt.plot(benchmark_drawdown.index, benchmark_drawdown.values, label=ticker, linewidth=2, alpha=0.85, color=color)
-        plt.title(f'Same-Cashflow Drawdown vs. {ticker} (USD)')
-        plt.xlabel('Date')
-        plt.ylabel('Drawdown (%)')
-        plt.legend()
-        plt.grid(True)
-        plt.tight_layout()
+        charts.figure(figsize=(11, 6))
+        charts.fill_between(my_us_drawdown.index, my_us_drawdown.values, 0, alpha=0.15, color='blue')
+        charts.plot(my_us_drawdown.index, my_us_drawdown.values, label='My Portfolio', linewidth=2, color='blue')
+        charts.plot(benchmark_drawdown.index, benchmark_drawdown.values, label=ticker, linewidth=2, alpha=0.85, color=color)
+        charts.title(f'Same-Cashflow Drawdown vs. {ticker} (USD)')
+        charts.xlabel('Date')
+        charts.ylabel('Drawdown (%)')
+        charts.legend()
+        charts.grid(True)
         save_report_chart(f'output/charts/{comparison_file}')
-        plt.show()
-        plt.close()
+        charts.close()
 
         drawdown_spread = my_us_drawdown - benchmark_drawdown.reindex(my_us_drawdown.index).ffill()
-        plt.figure(figsize=(11, 4.5))
-        plt.axhline(0, color='gray', linestyle='--', linewidth=1)
-        plt.fill_between(drawdown_spread.index, drawdown_spread.values, 0, where=(drawdown_spread.values >= 0), alpha=0.2, color='green')
-        plt.fill_between(drawdown_spread.index, drawdown_spread.values, 0, where=(drawdown_spread.values < 0), alpha=0.2, color='red')
-        plt.plot(drawdown_spread.index, drawdown_spread.values, color='#17365D' if ticker == 'EWT' else 'black', linewidth=1.8, label=f'My Drawdown - {ticker} Drawdown')
-        plt.title(f'Drawdown Spread vs. {ticker} (Positive = My Portfolio More Resilient)')
-        plt.xlabel('Date')
-        plt.ylabel('Spread (%)')
-        plt.legend()
-        plt.grid(True)
-        plt.tight_layout()
+        charts.figure(figsize=(11, 4.5))
+        charts.axhline(0, color='gray', linestyle='--', linewidth=1)
+        charts.fill_between(drawdown_spread.index, drawdown_spread.values, 0, where=(drawdown_spread.values >= 0), alpha=0.2, color='green')
+        charts.fill_between(drawdown_spread.index, drawdown_spread.values, 0, where=(drawdown_spread.values < 0), alpha=0.2, color='red')
+        charts.plot(drawdown_spread.index, drawdown_spread.values, color='#17365D' if ticker == 'EWT' else 'black', linewidth=1.8, label=f'My Drawdown - {ticker} Drawdown')
+        charts.title(f'Drawdown Spread vs. {ticker} (Positive = My Portfolio More Resilient)')
+        charts.xlabel('Date')
+        charts.ylabel('Spread (%)')
+        charts.legend()
+        charts.grid(True)
         save_report_chart(f'output/charts/{spread_file}')
-        plt.show()
-        plt.close()
+        charts.close()
 
     # --- 3-6. 資產圓餅圖 ---
     # Use the same historical valuation as the total-assets headline, rather
@@ -1246,34 +1225,30 @@ def main():
     total_pie_twd = pie_values.sum()
     pie_labels = [f'{symbol}  {value / total_pie_twd:.2%}  ({value:,.0f} 元)'
                   for symbol, value in pie_values.items()]
-    palette = plt.get_cmap('tab20').colors
+    palette = charts.get_cmap('tab20').colors
     pie_colors = ['#969696' if symbol == '現金（推算）' else palette[i % len(palette)]
                   for i, symbol in enumerate(pie_values.index)]
-    plt.figure(figsize=(12, 7))
-    wedges, _ = plt.pie(pie_values, colors=pie_colors, startangle=140)
-    plt.legend(wedges, pie_labels, loc='center left', bbox_to_anchor=(1, 0.5), frameon=False)
-    plt.title(f'資產配置（含現金）｜總資產 {total_pie_twd:,.0f} 元')
-    plt.axis('equal')
-    plt.tight_layout()
-    save_report_chart('output/charts/asset_pie_chart.png')
-    plt.show()
-    plt.close()
+    charts.figure(figsize=(12, 7))
+    wedges, _ = charts.pie(pie_values, colors=pie_colors, startangle=140)
+    charts.legend(wedges, pie_labels, loc='center left', bbox_to_anchor=(1, 0.5), frameon=False)
+    charts.title(f'資產配置（含現金）｜總資產 {total_pie_twd:,.0f} 元')
+    charts.axis('equal')
+    save_report_chart('output/charts/asset_pie_chart.svg')
+    charts.close()
 
     # --- 3-7. 每月投入資產 ---
     daily_injection = pd.Series(dict(combined_external_cashflows), dtype=float).abs()
     monthly_investment = daily_injection.groupby(daily_injection.index.to_period('M')).sum()
     monthly_investment.index = monthly_investment.index.to_timestamp()
 
-    plt.figure(figsize=(10, 6))
-    plt.bar(monthly_investment.index, monthly_investment.values, width=20)
-    plt.title("每月投入資產 (USD)")
-    plt.xlabel("月份")
-    plt.ylabel("投入金額 (USD)")
-    plt.grid(True, axis='y')
-    plt.tight_layout()
-    save_report_chart('output/charts/monthly_investment.png')
-    plt.show()
-    plt.close()
+    charts.figure(figsize=(10, 6))
+    charts.bar(monthly_investment.index, monthly_investment.values, width=20)
+    charts.title("每月投入資產 (USD)")
+    charts.xlabel("月份")
+    charts.ylabel("投入金額 (USD)")
+    charts.grid(True, axis='y')
+    save_report_chart('output/charts/monthly_investment.svg')
+    charts.close()
 
     # --- 3-8. 個股績效 (TWR) ---
     plot_stock_performance(tw_result, us_result)

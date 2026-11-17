@@ -2,16 +2,12 @@ from pathlib import Path
 import os
 import sys
 from types import SimpleNamespace
+from xml.etree import ElementTree as ET
 
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 
-import matplotlib
-import matplotlib.pyplot as plt
-plt.close('all')
-matplotlib.use('Agg')
 import numpy as np
 import pandas as pd
-from PIL import Image
 import pytest
 
 import portfolio.app as app
@@ -103,27 +99,26 @@ def test_failed_put_queries_are_retried(monkeypatch):
     assert calls == ['QQQ'] * 4
 
 
-def test_fast_chart_save_preserves_pixels_dimensions_and_dpi(tmp_path):
-    fig, ax = plt.subplots(figsize=(4, 3))
+def test_chart_save_serializes_fresh_data_and_preserves_dimensions(tmp_path):
+    fig, ax = reporting.charts.subplots(figsize=(4, 3))
     ax.plot([0, 1, 2], [1, 4, 2], label='Portfolio')
     ax.legend()
-    plt.tight_layout()
-    baseline = tmp_path / 'baseline.png'
-    optimized = tmp_path / 'optimized.png'
+    destination = tmp_path / 'chart.svg'
     try:
-        plt.savefig(baseline, dpi=125)
-        reporting.save_report_chart(optimized, dpi=125)
-        with Image.open(baseline) as before, Image.open(optimized) as after:
-            assert before.size == after.size == (500, 375)
-            assert before.info['dpi'] == after.info['dpi']
-            np.testing.assert_array_equal(np.asarray(before), np.asarray(after))
+        reporting.save_report_chart(destination)
+        before = ET.fromstring(destination.read_text(encoding='utf-8'))
+        assert before.attrib['viewBox'] == '0 0 400 300'
+        assert len(before.findall('.//{*}path[@class="series-line"]')) == 1
+        ax.plot([0, 1, 2], [2, 3, 1], label='New data')
+        reporting.save_report_chart(destination)
+        after = ET.fromstring(destination.read_text(encoding='utf-8'))
+        assert len(after.findall('.//{*}path[@class="series-line"]')) == 2
     finally:
-        plt.close(fig)
+        reporting.charts.close(fig)
 
 
-def test_put_stress_values_and_chart_pixels_match_with_cached_quotes(monkeypatch, tmp_path, capsys):
+def test_put_stress_values_and_svg_match_with_cached_quotes(monkeypatch, tmp_path, capsys):
     monkeypatch.chdir(tmp_path)
-    monkeypatch.setattr(plt, 'show', lambda: None)
     (tmp_path / 'output/charts').mkdir(parents=True)
     calls = []
 
@@ -136,21 +131,17 @@ def test_put_stress_values_and_chart_pixels_match_with_cached_quotes(monkeypatch
         {'Symbol': 'QQQ270115P00350000', 'Quantity_now': 100, 'Price_Total': 1000, 'Cost': 1100},
         {'Symbol': 'QLD', 'Quantity_now': 10, 'Price_Total': 2000, 'Cost': 1500},
     ])
-    save_chart = reporting.save_report_chart
     get_cached_data = reporting.get_cached_data
-    monkeypatch.setattr(reporting, 'save_report_chart', plt.savefig)
     monkeypatch.setattr(reporting, 'get_cached_data', lambda key, fetch, **kwargs: fetch())
     reporting.analyze_put_protection(positions)
     original_text = capsys.readouterr().out
-    filenames = ['total_asset_protection.png', 'put_stock_hedge_effect.png']
-    original_pixels = {name: np.array(Image.open(tmp_path / 'output/charts' / name)) for name in filenames}
+    filenames = ['total_asset_protection.svg', 'put_stock_hedge_effect.svg']
+    original_svg = {name: (tmp_path / 'output/charts' / name).read_bytes() for name in filenames}
 
-    monkeypatch.setattr(reporting, 'save_report_chart', save_chart)
     monkeypatch.setattr(reporting, 'get_cached_data', get_cached_data)
     for _ in range(2):
         reporting.analyze_put_protection(positions)
         assert capsys.readouterr().out == original_text
         for name in filenames:
-            with Image.open(tmp_path / 'output/charts' / name) as image:
-                np.testing.assert_array_equal(np.asarray(image), original_pixels[name])
+            assert (tmp_path / 'output/charts' / name).read_bytes() == original_svg[name]
     assert len(calls) == 2

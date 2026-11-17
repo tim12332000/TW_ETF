@@ -1,26 +1,18 @@
 import re
 from datetime import datetime
-from pathlib import Path
 
-import matplotlib.pyplot as plt
+from . import svg_charts as charts
 import numpy as np
 import pandas as pd
 import yfinance as yf
-from matplotlib import rcParams
 from scipy.optimize import brentq
-from scipy.stats import norm
+from scipy.special import ndtr
 from tabulate import tabulate
 from .cache import get_cached_data
 
 
-rcParams['font.sans-serif'] = ['Microsoft YaHei']
-rcParams['axes.unicode_minus'] = False
-
-
-def save_report_chart(path, **kwargs):
-    # pyplot.savefig triggers a second Agg draw after saving the same figure.
-    Path(path).parent.mkdir(parents=True, exist_ok=True)
-    plt.gcf().savefig(path, pil_kwargs={'compress_level': 1}, **kwargs)
+def save_report_chart(path):
+    charts.gcf().savefig(path)
 
 
 def color_signed(value, text):
@@ -35,22 +27,20 @@ def color_signed(value, text):
 
 
 def plot_stock_performance(tw_res, us_res):
-    plt.figure(figsize=(14, 8))
-    _process_stock_twr(tw_res, 'TW', plt)
-    _process_stock_twr(us_res, 'US', plt)
-    plt.title('Individual Stock Performance (Equity Return %)')
-    plt.xlabel('Date')
-    plt.ylabel('Cumulative Return (%)')
-    plt.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='small', ncol=1)
-    plt.grid(True, alpha=0.3)
-    plt.tight_layout()
-    save_report_chart('output/charts/stock_performance.png')
-    plt.show()
-    plt.close()
-    print('Stock performance chart saved to output/charts/stock_performance.png')
+    charts.figure(figsize=(14, 8))
+    _process_stock_twr(tw_res, 'TW', charts)
+    _process_stock_twr(us_res, 'US', charts)
+    charts.title('Individual Stock Performance (Equity Return %)')
+    charts.xlabel('Date')
+    charts.ylabel('Cumulative Return (%)')
+    charts.legend(bbox_to_anchor=(1.05, 1), loc='upper left', fontsize='small', ncol=1)
+    charts.grid(True, alpha=0.3)
+    save_report_chart('output/charts/stock_performance.svg')
+    charts.close()
+    print('Stock performance chart saved to output/charts/stock_performance.svg')
 
 
-def _process_stock_twr(res_data, region, plt_obj):
+def _process_stock_twr(res_data, region, plotter):
     df_tx = res_data['df']
     price_df = res_data['price_data']
     date_range = res_data['date_range']
@@ -107,7 +97,7 @@ def _process_stock_twr(res_data, region, plt_obj):
                     continue
             alpha = 1.0 if abs(current_shares) > 0.001 else 0.4
             linestyle = '-' if abs(current_shares) > 0.001 else ':'
-            plt_obj.plot(plot_data.index, plot_data, label=f'{sym} ({region})', alpha=alpha, linestyle=linestyle, linewidth=1.5)
+            plotter.plot(plot_data.index, plot_data, label=f'{sym} ({region})', alpha=alpha, linestyle=linestyle, linewidth=1.5)
         except Exception as e:
             print(f'Error calculating TWR for {sym}: {e}')
 
@@ -162,15 +152,26 @@ def print_rebalance_recommendation(portfolio_df_combined, usd_to_twd):
 
 
 def black_scholes_put(S, K, T, r, sigma):
-    if K <= 0:
-        return 0.0
-    if T <= 0 or sigma <= 0:
-        return max(K - S, 0.0)
-    if S <= 0:
-        return K * np.exp(-r * T)
-    d1 = (np.log(S / K) + (r + 0.5 * sigma ** 2) * T) / (sigma * np.sqrt(T))
-    d2 = d1 - sigma * np.sqrt(T)
-    return K * np.exp(-r * T) * norm.cdf(-d2) - S * norm.cdf(-d1)
+    """Price scalar or broadcastable put inputs with the same boundary rules."""
+    S, K, T, r, sigma = np.broadcast_arrays(
+        *(np.asarray(value, dtype=float) for value in (S, K, T, r, sigma))
+    )
+    values = np.empty(S.shape, dtype=float)
+    zero_strike = K <= 0
+    intrinsic = ~zero_strike & ((T <= 0) | (sigma <= 0))
+    discounted = ~zero_strike & ~intrinsic & (S <= 0)
+    regular = ~(zero_strike | intrinsic | discounted)
+    values[zero_strike] = 0.0
+    values[intrinsic] = np.maximum(K[intrinsic] - S[intrinsic], 0.0)
+    values[discounted] = K[discounted] * np.exp(-r[discounted] * T[discounted])
+    if regular.any():
+        spot, strike, years, rate, volatility = (
+            value[regular] for value in (S, K, T, r, sigma)
+        )
+        d1 = (np.log(spot / strike) + (rate + 0.5 * volatility ** 2) * years) / (volatility * np.sqrt(years))
+        d2 = d1 - volatility * np.sqrt(years)
+        values[regular] = strike * np.exp(-rate * years) * ndtr(-d2) - spot * ndtr(-d1)
+    return values.item() if values.ndim == 0 else values
 
 
 def implied_volatility_for_put(market_price, S, K, T, r=0.045):
@@ -187,19 +188,21 @@ def implied_volatility_for_put(market_price, S, K, T, r=0.045):
 
 def estimate_put_scenario_value(put_info, underlying_return, today=None, risk_free_rate=0.045):
     """Revalue a put under a price shock while anchoring the curve to its market value."""
+    underlying_return = np.asarray(underlying_return, dtype=float)
     today = pd.Timestamp(today or datetime.now()).normalize()
     expiry = pd.Timestamp(put_info['expiry']).normalize()
     if expiry <= today:
-        return 0.0
+        values = np.zeros_like(underlying_return)
+        return values.item() if values.ndim == 0 else values
 
     years_to_expiry = (expiry - today).days / 365.0
     base_volatility = 0.20
-    stressed_volatility = base_volatility + max(-underlying_return, 0.0) * 0.8
+    stressed_volatility = base_volatility + np.maximum(-underlying_return, 0.0) * 0.8
     current_model_value = black_scholes_put(
         put_info['s0'], put_info['strike'], years_to_expiry, risk_free_rate, base_volatility
     )
     stressed_model_value = black_scholes_put(
-        max(put_info['s0'] * (1 + underlying_return), 0.0),
+        np.maximum(put_info['s0'] * (1 + underlying_return), 0.0),
         put_info['strike'],
         years_to_expiry,
         risk_free_rate,
@@ -207,7 +210,8 @@ def estimate_put_scenario_value(put_info, underlying_return, today=None, risk_fr
     )
     contract_multiplier = 100.0 * put_info['contracts']
     model_change = (stressed_model_value - current_model_value) * contract_multiplier
-    return max(float(put_info['market_value']) + model_change, 0.0)
+    values = np.maximum(float(put_info['market_value']) + model_change, 0.0)
+    return values.item() if values.ndim == 0 else values
 
 
 def analyze_put_protection(portfolio_df):
@@ -350,50 +354,38 @@ def analyze_put_protection(portfolio_df):
     print('| 情境 | 基準漲跌幅 | 總資產（未避險） | 總資產（含 Put） | Put 總價值 | 保護效果 |')
     print('| :--- | :--- | :--- | :--- | :--- | :--- |')
 
-    drops = np.linspace(1.00, -1.00, 200)
-    wealth_no_hedge = []
-    wealth_with_hedge = []
-
-    for scenario in scenarios:
-        drop = scenario['drop']
-        new_total_no_put = sum(pos['value'] * (1 + stress_assumption(pos['sym'], drop)[0]) for pos in non_put_positions)
-        total_put_val = 0
+    def scenario_put_values(return_grid):
+        return_grid = np.asarray(return_grid, dtype=float)
+        values = np.zeros_like(return_grid)
         for put_info in puts_info:
             if put_info['expiry'] <= today:
                 continue
-            if drop == 0:
-                total_put_val += put_info['market_value']
-            else:
-                days_to_exp = (put_info['expiry'] - today).days
-                T = days_to_exp / 365.0
-                new_u = put_info['s0'] * (1 + drop)
-                vol = 0.20 + max(-drop, 0) * 0.8
-                put_val_share = black_scholes_put(new_u, put_info['strike'], T, r, vol)
-                total_put_val += put_val_share * 100 * put_info['contracts']
+            years = (put_info['expiry'] - today).days / 365.0
+            prices = black_scholes_put(
+                put_info['s0'] * (1 + return_grid), put_info['strike'], years, r,
+                0.20 + np.maximum(-return_grid, 0) * 0.8,
+            )
+            values += np.where(return_grid == 0, put_info['market_value'],
+                               prices * 100 * put_info['contracts'])
+        return values
+
+    table_put_values = scenario_put_values([scenario['drop'] for scenario in scenarios])
+    for scenario, total_put_val in zip(scenarios, table_put_values):
+        drop = scenario['drop']
+        new_total_no_put = sum(pos['value'] * (1 + stress_assumption(pos['sym'], drop)[0]) for pos in non_put_positions)
         new_total_with_put = new_total_no_put + total_put_val
         diff = new_total_with_put - new_total_no_put
         protection = color_signed(diff, f"+${diff:,.0f}") if diff > 0 else f"${diff:,.0f}"
         print(f"| {scenario['desc']} | {drop*100:.0f}% | ${new_total_no_put:,.0f} | **${new_total_with_put:,.0f}** | ${total_put_val:,.0f} | {protection} |")
 
-    for drop in drops:
-        val_no = sum(pos['value'] * (1 + stress_assumption(pos['sym'], drop)[0]) for pos in non_put_positions)
-        total_pv = 0
-        for put_info in puts_info:
-            if put_info['expiry'] <= today:
-                continue
-            if drop == 0:
-                total_pv += put_info['market_value']
-            else:
-                days_to_exp = (put_info['expiry'] - today).days
-                T = days_to_exp / 365.0
-                new_u = put_info['s0'] * (1 + drop)
-                vol = 0.20 + max(-drop, 0) * 0.8
-                pv_share = black_scholes_put(new_u, put_info['strike'], T, r, vol)
-                total_pv += pv_share * 100 * put_info['contracts']
-        wealth_no_hedge.append(val_no)
-        wealth_with_hedge.append(val_no + total_pv)
+    drops = np.linspace(1.00, -1.00, 200)
+    wealth_no_hedge = np.array([
+        sum(pos['value'] * (1 + stress_assumption(pos['sym'], drop)[0]) for pos in non_put_positions)
+        for drop in drops
+    ])
+    wealth_with_hedge = wealth_no_hedge + scenario_put_values(drops)
 
-    fig, ax1 = plt.subplots(figsize=(10, 6))
+    fig, ax1 = charts.subplots(figsize=(10, 6))
     ax1.plot(drops * 100, wealth_no_hedge, label='全投組壓力測試（不含 Put）', color='red', linewidth=2)
     ax1.plot(drops * 100, wealth_with_hedge, label='全投組壓力測試（含 Put）', color='blue', linewidth=2)
     ax1.fill_between(drops * 100, wealth_no_hedge, wealth_with_hedge, color='green', alpha=0.1, label='保護效果')
@@ -420,29 +412,22 @@ def analyze_put_protection(portfolio_df):
     except Exception:
         pass
 
-    plt.tight_layout()
-    save_report_chart('output/charts/total_asset_protection.png')
-    plt.show()
-    plt.close()
-    print('圖表已儲存至 output/charts/total_asset_protection.png')
+    save_report_chart('output/charts/total_asset_protection.svg')
+    charts.close()
+    print('圖表已儲存至 output/charts/total_asset_protection.svg')
 
     hedge_drops = np.linspace(-0.90, 0.20, 221)
-    stock_pnl = []
-    put_pnl = []
-    for drop in hedge_drops:
-        stressed_non_put_value = sum(
+    stock_pnl = np.array([
+        sum(
             pos['value'] * (1 + stress_assumption(pos['sym'], drop)[0])
             for pos in non_put_positions
-        )
-        stressed_put_value = sum(
-            estimate_put_scenario_value(put_info, drop, today=today, risk_free_rate=r)
-            for put_info in puts_info
-        )
-        stock_pnl.append(stressed_non_put_value - base_non_put_value)
-        put_pnl.append(stressed_put_value - current_put_market_value)
-
-    stock_pnl = np.asarray(stock_pnl)
-    put_pnl = np.asarray(put_pnl)
+        ) - base_non_put_value
+        for drop in hedge_drops
+    ])
+    put_pnl = sum(
+        estimate_put_scenario_value(put_info, hedge_drops, today=today, risk_free_rate=r)
+        for put_info in puts_info
+    ) - current_put_market_value
     hedged_pnl = stock_pnl + put_pnl
     downside_mask = stock_pnl < 0
     coverage = np.zeros_like(stock_pnl)
@@ -452,7 +437,7 @@ def analyze_put_protection(portfolio_df):
     key_indices = [int(np.argmin(np.abs(hedge_drops - drop))) for drop in key_drops]
     key_coverage = coverage[key_indices]
 
-    fig, (ax_pnl, ax_coverage) = plt.subplots(
+    fig, (ax_pnl, ax_coverage) = charts.subplots(
         1, 2, figsize=(14, 6), gridspec_kw={'width_ratios': [1.7, 1]}
     )
     x_pct = hedge_drops * 100
@@ -497,8 +482,6 @@ def analyze_put_protection(portfolio_df):
         fontsize=9,
         color='#555555',
     )
-    plt.tight_layout(rect=[0, 0.04, 1, 0.94])
-    save_report_chart('output/charts/put_stock_hedge_effect.png', dpi=160)
-    plt.show()
-    plt.close()
-    print('圖表已儲存至 output/charts/put_stock_hedge_effect.png')
+    save_report_chart('output/charts/put_stock_hedge_effect.svg')
+    charts.close()
+    print('圖表已儲存至 output/charts/put_stock_hedge_effect.svg')
