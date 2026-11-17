@@ -22,20 +22,14 @@ def calculate_twr_series(portfolio_value_series, cashflow_list):
     df = df.join(daily_cf, how='left').fillna(0)
 
     returns = []
-    prev_pv = 0
-    started = False
-    for _, row in df.iterrows():
-        pv = row['PV']
-        cf = row['Amt']
-        if not started:
-            if pv > 0:
-                started = True
-                prev_pv = pv
-            returns.append(0.0)
-            continue
-        daily_r = 0.0 if prev_pv == 0 else (pv + cf - prev_pv) / prev_pv
-        returns.append(daily_r)
-        prev_pv = pv
+    if not df.empty:
+        pv, cf = df.to_numpy().T
+        returns = np.zeros(len(df))
+        # Work positionally: normalized dates may be duplicated or out of order.
+        active = np.logical_or.accumulate(pv[:-1] > 0) & (pv[:-1] != 0)
+        positions = np.flatnonzero(active) + 1
+        prev_pv = pv[positions - 1]
+        returns[positions] = (pv[positions] + cf[positions] - prev_pv) / prev_pv
 
     twr_series = pd.Series(returns, index=df.index)
     return ((1 + twr_series).cumprod() - 1) * 100

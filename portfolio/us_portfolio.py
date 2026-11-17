@@ -311,9 +311,11 @@ def process_us_data(
 
     net_holdings_us = df_us.groupby("Symbol")["Quantity"].sum()
     portfolio_snapshot_us = 0
+    current_prices_us = {}
     for stock, shares in net_holdings_us.items():
         if shares != 0:
             price = resolve_market_price(stock, history_series=price_data_us.get(stock), is_tw=False)
+            current_prices_us[stock] = price
             if price is not None:
                 portfolio_snapshot_us += shares * price
 
@@ -342,7 +344,9 @@ def process_us_data(
         aggregated_cost = -data_dict["cost"]
         if count != 0:
             try:
-                current_price = resolve_market_price(stock_code, history_series=price_data_us.get(stock_code), is_tw=False)
+                if stock_code not in current_prices_us:
+                    current_prices_us[stock_code] = resolve_market_price(stock_code, history_series=price_data_us.get(stock_code), is_tw=False)
+                current_price = current_prices_us[stock_code]
             except Exception as e:
                 print(f"Error fetching data for {stock_code}: {e}")
                 current_price = get_latest_available_price(price_data_us.get(stock_code))

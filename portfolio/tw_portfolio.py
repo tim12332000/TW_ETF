@@ -97,6 +97,7 @@ def process_tw_data(
 
     net_holdings_tw = df_tw.groupby("Symbol")["Quantity"].sum()
     portfolio_snapshot_tw = 0
+    current_prices_tw = {}
     latest_usd_twd = float(usd_twd_series.iloc[-1])
     for stock, shares in net_holdings_tw.items():
         if shares != 0:
@@ -104,6 +105,7 @@ def process_tw_data(
             fallback_price_twd = (fallback_price_usd * latest_usd_twd) if fallback_price_usd is not None else None
             live_price_twd = get_current_price_yf(stock, is_tw=True, fallback_price=fallback_price_twd)
             price = (live_price_twd / latest_usd_twd) if live_price_twd is not None else fallback_price_usd
+            current_prices_tw[stock] = price
             if price is not None:
                 portfolio_snapshot_tw += shares * price
 
@@ -132,10 +134,12 @@ def process_tw_data(
         aggregated_cost = -data_dict["cost"]
         if count != 0:
             try:
-                fallback_price_usd = get_latest_available_price(price_data_tw.get(stock_code))
-                fallback_price_twd = (fallback_price_usd * latest_usd_twd) if fallback_price_usd is not None else None
-                live_price_twd = get_current_price_yf(stock_code, is_tw=True, fallback_price=fallback_price_twd)
-                current_price = (live_price_twd / latest_usd_twd) if live_price_twd is not None else fallback_price_usd
+                if stock_code not in current_prices_tw:
+                    fallback_price_usd = get_latest_available_price(price_data_tw.get(stock_code))
+                    fallback_price_twd = (fallback_price_usd * latest_usd_twd) if fallback_price_usd is not None else None
+                    live_price_twd = get_current_price_yf(stock_code, is_tw=True, fallback_price=fallback_price_twd)
+                    current_prices_tw[stock_code] = (live_price_twd / latest_usd_twd) if live_price_twd is not None else fallback_price_usd
+                current_price = current_prices_tw[stock_code]
             except Exception as e:
                 print(f"Error fetching data for {stock_code}: {e}")
                 current_price = get_latest_available_price(price_data_tw.get(stock_code))
